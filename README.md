@@ -29,7 +29,7 @@ Collaborate. Share files. Nothing is saved.
 - [Security model](#security-model)
 - [Testing](#testing)
 - [Production build](#production-build)
-- [EC2 deployment](#ec2-deployment)
+- [EC2 deployment](#ec2-deployment) — full runbook: [docs/aws-setup.md](docs/aws-setup.md)
 - [DNS](#dns)
 - [HTTPS with certbot](#https-with-certbot)
 - [Verified version quintet](#verified-version-quintet)
@@ -551,6 +551,10 @@ rsync -av dist/ user@host:/opt/ephemeral-rooms/frontend/dist/
 ## EC2 deployment
 
 Single instance. No S3, RDS, Redis, ECS, Kubernetes, or load balancer.
+
+> **Setting this up from nothing?** [`docs/aws-setup.md`](docs/aws-setup.md) is the
+> full runbook: instance, security group, Elastic IP, DNS, TLS, GitHub
+> secrets, costs, teardown, and troubleshooting. This section is the summary.
 
 ### The short version
 
