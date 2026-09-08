@@ -1,0 +1,58 @@
+# ---------------------------------------------------------------- Secrets
+#
+# Real configuration never enters the repository. `backend/.env.example` is the
+# tracked template and is deliberately NOT matched by these patterns; keep it
+# that way, and keep it in step whenever you add a variable.
+.env
+.env.local
+.env.*.local
+
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------------------------------------------------------------- Node
+node_modules/
+.vite/
+*.tsbuildinfo
+
+# The production bundle is a build artifact, not source. Deployment builds it
+# on your machine and rsyncs `dist/` to the instance, because Node is a
+# build-time dependency only and is never installed on the server. Do not
+# "fix" a missing dist by committing one.
+frontend/dist/
+
+# ---------------------------------------------------------------- Runtime data
+#
+# Room files. Rooms are ephemeral by design and the server wipes its data root
+# on every startup, so nothing here is ever meant to persist or be shared.
+.data/
+backend/.data/
+backend/.data-*/
+
+# ---------------------------------------------------------------- Test output
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
+# ---------------------------------------------------------------- Editors and OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------- Logs
+*.log
