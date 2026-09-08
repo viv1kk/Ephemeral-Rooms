@@ -73,7 +73,8 @@ export type ServerEvent =
   | { type: 'document_created'; document: RoomDocument; opSeq: number }
   | { type: 'document_renamed'; documentId: string; name: string; opSeq: number }
   | { type: 'document_deleted'; documentId: string; name: string; deletedBy: string; opSeq: number }
-  | { type: 'file_added'; file: RoomFile }
+  | { type: 'file_added'; file: RoomFile; uploadId: string }
+  | { type: 'upload_ended'; uploadId: string; reason: string }
   | { type: 'file_deleted'; fileId: string; name: string; deletedBy: string }
   | { type: 'upload_progress'; uploadId: string; uploaderName: string; filename: string; percent: number }
   | { type: 'storage'; available: number }

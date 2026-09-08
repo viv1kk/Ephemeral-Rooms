@@ -14,6 +14,7 @@ import logging
 from app.files.reservations import ReservationLedger
 from app.rooms.manager import RoomManager
 from app.storage.protocols import Clock, FileStore
+from app.ws import events
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +78,11 @@ class UploadReaper:
                 await self._ledger.release(upload.upload_id)
                 await self._store.discard_part(room.room_instance_id, upload.upload_id)
                 reaped += 1
+                # The uploader has gone silent, so nothing else will ever clear
+                # this transfer from other participants' screens.
+                await room.broadcast_json(
+                    events.upload_ended(upload.upload_id, "abandoned")
+                )
                 log.info(
                     "reaped stale upload %s in room %s", upload.upload_id, room.room_code
                 )

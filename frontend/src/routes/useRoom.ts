@@ -38,7 +38,7 @@ export interface RoomStateValue {
   limits: Limits | null;
   toasts: Toast[];
   roomWasCreated: boolean;
-  remoteUploads: Record<string, { name: string; uploader: string; percent: number }>;
+  remoteUploads: Record<string, { name: string; uploader: string; percent: number; updatedAt: number }>;
   selectDocument: (documentId: string) => void;
   createDocument: (name: string) => void;
   renameDocument: (documentId: string, name: string) => void;
@@ -52,6 +52,23 @@ export interface RoomStateValue {
 }
 
 let toastSeq = 0;
+
+/** Remove one in-flight upload, if it is still being tracked. */
+function dropUpload(
+  current: RoomStateValue['remoteUploads'],
+  uploadId: string,
+): RoomStateValue['remoteUploads'] {
+  if (!(uploadId in current)) return current;
+  const next = { ...current };
+  delete next[uploadId];
+  return next;
+}
+
+// Progress is broadcast at most once a second while a transfer is alive, so a
+// row that has said nothing for this long belongs to an uploader whose tab
+// died. The server's reaper announces the ones it catches, but it only runs
+// every UPLOAD_STALE_MS; this stops a stuck bar sitting there until then.
+const REMOTE_UPLOAD_STALE_MS = 45_000;
 
 export function useRoom(roomCode: string): RoomStateValue {
   const [status, setStatus] = useState<ConnectionStatus>('connecting');
@@ -200,11 +217,11 @@ export function useRoom(roomCode: string): RoomStateValue {
         }
         case 'file_added':
           setFiles((c) => [...c.filter((f) => f.fileId !== event.file.fileId), event.file]);
-          setRemoteUploads((c) => {
-            const next = { ...c };
-            delete next[event.file.fileId];
-            return next;
-          });
+          setRemoteUploads((c) => dropUpload(c, event.uploadId));
+          break;
+        case 'upload_ended':
+          // Cancelled or reaped: no file is coming, so retire the row.
+          setRemoteUploads((c) => dropUpload(c, event.uploadId));
           break;
         case 'file_deleted':
           setFiles((c) => c.filter((f) => f.fileId !== event.fileId));
@@ -216,6 +233,7 @@ export function useRoom(roomCode: string): RoomStateValue {
               name: event.filename,
               uploader: event.uploaderName,
               percent: event.percent,
+              updatedAt: Date.now(),
             },
           }));
           break;
@@ -283,6 +301,20 @@ export function useRoom(roomCode: string): RoomStateValue {
       text: () => collab?.text.toString() ?? null,
     };
   }, [identity, collab]);
+
+  // Backstop for an uploader whose tab died mid-transfer: no file_added and no
+  // upload_ended will ever arrive for them, so nothing else would clear the row.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setRemoteUploads((current) => {
+        const cutoff = Date.now() - REMOTE_UPLOAD_STALE_MS;
+        const live = Object.entries(current).filter(([, u]) => u.updatedAt >= cutoff);
+        if (live.length === Object.keys(current).length) return current;
+        return Object.fromEntries(live);
+      });
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const send = useCallback((message: Parameters<RoomClient['send']>[0]) => {
     clientRef.current?.send(message);
