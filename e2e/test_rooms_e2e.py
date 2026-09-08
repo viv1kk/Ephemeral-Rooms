@@ -182,3 +182,33 @@ def test_the_status_bar_reports_connection_people_and_storage(open_room) -> None
     assert "Connected" in status
     assert "1 person" in status
     assert "Available storage:" in status
+
+
+def test_upload_progress_disappears_when_the_upload_finishes(open_room) -> None:
+    """The progress row is transient: once the file lands it must be replaced
+    by the file list entry, for the uploader and for everyone watching.
+
+    The uploader's own row is driven locally from XHR progress events, while
+    other participants see a coarse broadcast, so the two are cleaned up by
+    different paths and both need asserting."""
+    a = open_room("6009")
+    b = open_room("6009")
+
+    # Large enough that progress is broadcast at least once before completion,
+    # so the observer definitely has a row to clean up.
+    a.page.set_input_files(
+        "[data-testid=file-input]",
+        files=[{"name": "big.bin", "mimeType": "application/octet-stream",
+                "buffer": b"x" * (3 * 1024 * 1024)}],
+    )
+
+    # Both see the finished file.
+    a.page.wait_for_selector("[data-testid=file-list] >> text=big.bin", timeout=30000)
+    b.page.wait_for_selector("[data-testid=file-list] >> text=big.bin", timeout=30000)
+
+    # And neither is left with a progress row.
+    a.page.wait_for_function("() => document.querySelectorAll('.upload').length === 0", timeout=15000)
+    b.page.wait_for_function("() => document.querySelectorAll('.upload').length === 0", timeout=15000)
+
+    assert a.page.locator(".upload").count() == 0, "the uploader's progress row was left behind"
+    assert b.page.locator(".upload.remote").count() == 0, "the observer's progress row was left behind"

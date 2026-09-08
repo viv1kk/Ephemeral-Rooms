@@ -89,8 +89,22 @@ def document_deleted(record: DocumentRecord, by_name: str, op_seq: int) -> dict[
     }
 
 
-def file_added(record: FileRecord) -> dict[str, Any]:
-    return {"type": "file_added", "file": record.public()}
+def file_added(record: FileRecord, upload_id: str) -> dict[str, Any]:
+    """A finished upload.
+
+    Carries the uploadId as well as the file, because other participants have
+    been tracking this transfer by its uploadId and have no other way to know
+    which of their in-flight progress rows this file completes. Without it the
+    progress bar is never cleared."""
+    return {"type": "file_added", "file": record.public(), "uploadId": upload_id}
+
+
+def upload_ended(upload_id: str, reason: str) -> dict[str, Any]:
+    """An upload that stopped without producing a file: cancelled by the
+    uploader, or reaped after going silent. Observers clear their progress row
+    on this; otherwise a cancelled transfer leaves a bar stuck at whatever
+    percentage it reached."""
+    return {"type": "upload_ended", "uploadId": upload_id, "reason": reason}
 
 
 def file_deleted(file_id: str, name: str, by_name: str) -> dict[str, Any]:

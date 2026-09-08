@@ -162,7 +162,9 @@ async def complete_upload(upload_id: str, request: Request) -> Any:
 
     from app.ws import events  # imported here to keep the module graph acyclic
 
-    await room.broadcast_json(events.file_added(record))
+    # The upload id travels with the file so watchers can retire the progress
+    # row they have been tracking under that id.
+    await room.broadcast_json(events.file_added(record, upload.upload_id))
     return {"file": record.public()}
 
 
@@ -174,6 +176,12 @@ async def abort_upload(upload_id: str, request: Request) -> Any:
     except UploadError as exc:
         return _error(exc)
     await services.uploads.abort(room, upload)
+
+    from app.ws import events
+
+    # No file will ever arrive for this upload, so tell watchers explicitly or
+    # their progress row stays at whatever percentage it had reached.
+    await room.broadcast_json(events.upload_ended(upload_id, "cancelled"))
     return Response(status_code=204)
 
 

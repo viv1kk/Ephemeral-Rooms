@@ -70,12 +70,15 @@ export function FilePanel({
           controller.signal,
         ).finally(() => {
           controllers.current.delete(task.localId);
-          // Completed uploads arrive back as a `file_added` event, so the
-          // transient row can go.
-          window.setTimeout(
-            () => setTasks((c) => c.filter((t) => t.localId !== task.localId || t.state === 'error')),
-            1500,
-          );
+          // A finished upload comes back as a `file_added` event and takes its
+          // place in the list above, so the transient row retires shortly after
+          // showing 100%. A failed one is kept: it carries the only explanation
+          // the user gets, and is dismissed by hand.
+          window.setTimeout(() => {
+            setTasks((c) =>
+              c.filter((t) => t.localId !== task.localId || t.state === 'error'),
+            );
+          }, 1200);
         });
       }
       if (input.current !== null) input.current.value = '';
@@ -83,6 +86,9 @@ export function FilePanel({
     [roomCode, userId, chunkBytes, tasks, maxUploadsPerUser, bump, onBroadcastProgress],
   );
 
+  // Also serves as "dismiss" for a failed upload: aborting is still the right
+  // call there, because the server may be holding a part file and a disk
+  // reservation that would otherwise wait for the reaper.
   const cancel = useCallback((task: UploadTask) => {
     controllers.current.get(task.localId)?.abort();
     // Tell the server too, so the .part file and its reservation go now
@@ -129,11 +135,17 @@ export function FilePanel({
         <div key={task.localId} className="upload">
           <div className="upload-head">
             <span className="file-name">{task.file.name}</span>
-            {task.state !== 'error' && task.state !== 'done' && (
+            {task.state === 'error' ? (
+              // A failed row is never retired automatically, so without this it
+              // would sit there for the life of the page.
+              <button className="link" onClick={() => cancel(task)}>
+                Dismiss
+              </button>
+            ) : task.state !== 'done' ? (
               <button className="link" onClick={() => cancel(task)}>
                 Cancel
               </button>
-            )}
+            ) : null}
           </div>
           {task.state === 'error' ? (
             <div className="upload-error">{task.error}</div>
