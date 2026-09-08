@@ -1,0 +1,54 @@
+# systemd unit for the ephemeral rooms server.
+#
+#   !!  EXACTLY ONE WORKER. See spec section 20.1 and the comment at the top of
+#   !!  backend/app/main.py. Every room, document, presence entry, session
+#   !!  token and disk reservation lives in this one process's memory. Adding
+#   !!  --workers N does not scale the application; it silently splits it into
+#   !!  N invisible copies, and users of the same room code land in different
+#   !!  ones. Do not "fix" this by switching to gunicorn.
+#
+# Install to /etc/systemd/system/ephemeral-rooms.service
+
+[Unit]
+Description=Ephemeral collaborative rooms
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ephemeral
+Group=ephemeral
+WorkingDirectory=/opt/ephemeral-rooms/backend
+EnvironmentFile=/etc/ephemeral-rooms.env
+
+# Exactly one worker. Do not add --workers N. Do not add --reload (it spawns a
+# reloader process, which is a second process holding no room state).
+ExecStart=/opt/ephemeral-rooms/.venv/bin/uvicorn app.main:app \
+          --host 127.0.0.1 --port 8000 --workers 1 \
+          --proxy-headers --forwarded-allow-ips 127.0.0.1
+
+Restart=always
+RestartSec=2
+
+# A restart loses every room; that is accepted and documented (spec section 19).
+# The boot sweep clears the data root on startup, which is what makes the
+# no-persistence guarantee true in practice rather than only in intent.
+
+# Hardening. DATA_ROOT must be listed in ReadWritePaths.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ephemeral-rooms
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ephemeral-rooms
+
+[Install]
+WantedBy=multi-user.target
