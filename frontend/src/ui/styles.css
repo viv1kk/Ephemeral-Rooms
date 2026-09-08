@@ -209,12 +209,36 @@ input, select {
   color: var(--text-dim);
 }
 
-/* Remote cursor labels rendered by y-codemirror.next. */
-.cm-ySelectionInfo {
+/* Remote cursors and selections, rendered by y-codemirror.next.
+   The colour comes from awareness state, so each participant keeps the same
+   hue everywhere (spec section 6). */
+
+/* The library hides the name label behind `:hover` on the caret, which is a
+   1px-wide target — so in practice you could never tell who was selecting.
+   Show it always. The selector is more specific than the library's injected
+   base theme, which is what lets it win. */
+.cm-editor .cm-ySelectionInfo {
+  opacity: 1;
+  transition-delay: 0s;
+  font-family: inherit;
   font-size: 11px;
-  padding: 1px 4px;
+  font-weight: 500;
+  padding: 0 5px;
   border-radius: 3px 3px 3px 0;
   color: #0f1115;
+  /* Never swallow a click meant for the text underneath. */
+  pointer-events: none;
+}
+
+/* Give the highlighted range a soft edge rather than a hard block. */
+.cm-editor .cm-ySelection {
+  border-radius: 2px;
+}
+
+/* The label sits at -1.05em above its caret, so a selection on the first line
+   would be clipped by the top of the scroller. Leave it room. */
+.cm-editor .cm-content {
+  padding-top: 14px;
 }
 
 /* ---------------- Status bar & toasts ---------------- */

@@ -181,3 +181,55 @@ def test_a_third_browser_joining_late_receives_the_current_document(open_room) -
     # A late joiner syncs from the server's replica by state-vector diff.
     c.wait_for_text("written before C arrived")
     assert c.people_count() == 3
+
+
+def test_a_remote_selection_is_highlighted_in_the_selecting_users_colour(open_room) -> None:
+    """Spec section 6: selections, not just carets, are shown and attributed.
+
+    y-codemirror.next renders a remote selection as `.cm-ySelection` with an
+    inline `background-color` taken from the awareness state's `colorLight`.
+    Its own base theme for that class is empty, so if the value is not valid
+    CSS the browser drops it and the selection is invisible while every
+    element is still present in the DOM. Asserting the element exists is
+    therefore not enough; this asserts the computed colour."""
+    a = open_room("5008")
+    b = open_room("5008")
+
+    a.type("select this whole line please")
+    b.wait_for_text("select this whole line please")
+
+    # B selects the line; A should see it highlighted.
+    b.click_editor()
+    b.page.keyboard.press("Home")
+    b.page.keyboard.press("Shift+End")
+
+    a.page.wait_for_selector(".cm-ySelection", timeout=15000)
+
+    painted = a.page.evaluate(
+        """() => {
+            const el = document.querySelector('.cm-ySelection');
+            const bg = getComputedStyle(el).backgroundColor;
+            return { bg, inline: el.getAttribute('style') };
+        }"""
+    )
+
+    assert painted["bg"] not in ("rgba(0, 0, 0, 0)", "transparent"), (
+        f"the remote selection is invisible: computed {painted['bg']!r} "
+        f"from inline style {painted['inline']!r}"
+    )
+
+    # And the label naming the selecting user is actually visible, not hidden
+    # behind a hover on a 1px caret the way the library ships it.
+    name = b.page.input_value("[data-testid=display-name]")
+    label = a.page.evaluate(
+        """() => {
+            const el = document.querySelector('.cm-ySelectionInfo');
+            if (!el) return null;
+            return { text: el.textContent, opacity: getComputedStyle(el).opacity };
+        }"""
+    )
+    assert label is not None, "no label identifying the remote user"
+    assert label["text"] == name, f"label said {label['text']!r}, expected {name!r}"
+    assert float(label["opacity"]) > 0.9, (
+        f"the label is present but invisible (opacity {label['opacity']})"
+    )
