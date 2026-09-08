@@ -178,3 +178,116 @@ jobs:
           check y-codemirror.next "$(node -p "require('./frontend/package.json').dependencies['y-codemirror.next']")"
 
           exit $fail
+
+  deploy:
+    name: Deploy to EC2
+    # Runs only after every check above has passed. This is the whole point of
+    # keeping deployment in the same workflow rather than chaining a second
+    # one: the dependency is a single graph, not a fragile workflow_run trigger.
+    needs: [backend, frontend, e2e, pinned-versions]
+
+    # Three independent guards, because an accidental deployment here is not a
+    # rollback - it destroys every live room (see below).
+    #   1. only the main branch
+    #   2. only a real push, never a PR or the weekly schedule
+    #   3. only once DEPLOY_ENABLED is set, so this stays inert until an
+    #      instance actually exists
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push' &&
+      vars.DEPLOY_ENABLED == 'true'
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Naming an environment lets you add a required reviewer in the repository
+    # settings without touching this file, turning the deploy into a one-click
+    # approval. Worth considering: a deploy restarts the service, and a restart
+    # loses every active room and every uploaded file by design. Anyone mid-session
+    # is disconnected with no warning.
+    environment:
+      name: production
+      url: https://${{ secrets.DEPLOY_DOMAIN }}
+
+    permissions:
+      contents: read
+      actions: read      # to download the frontend bundle built above
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Reuse the exact bundle CI tested rather than rebuilding it here. Node
+      # is never installed on the instance, so the built assets have to travel.
+      - name: Download the production bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Verify the bundle arrived
+        run: |
+          test -f frontend/dist/index.html \
+            || { echo "::error::frontend/dist/index.html is missing; bootstrap.sh would refuse to run"; exit 1; }
+          echo "bundle: $(find frontend/dist -type f | wc -l) files"
+
+      - name: Configure SSH
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pin the host key if one is provided; otherwise trust on first use.
+          # Providing DEPLOY_KNOWN_HOSTS is strictly better, because keyscan
+          # accepts whatever answers on the day.
+          if [ -n "${{ secrets.DEPLOY_KNOWN_HOSTS }}" ]; then
+            printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Copy the application to the instance
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/deploy_key -o BatchMode=yes" \
+            --exclude '.git' --exclude 'node_modules' --exclude '.venv' \
+            --exclude '__pycache__' --exclude '.pytest_cache' --exclude '.mypy_cache' \
+            ./ "$USER@$HOST:/tmp/ephemeral-rooms/"
+
+      # bootstrap.sh is idempotent, so this is both the first install and every
+      # subsequent redeploy. It preflights, installs from wheels only, refuses
+      # a unit file that has lost its --workers 1, and smoke-tests itself.
+      - name: Run the provisioner
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          DOMAIN: ${{ secrets.DEPLOY_DOMAIN }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "$USER@$HOST" \
+            "cd /tmp/ephemeral-rooms && sudo ./deploy/bootstrap.sh '$DOMAIN'"
+
+      # Prove the deployed thing actually answers, rather than trusting that
+      # the script exited zero.
+      - name: Verify the live site
+        env:
+          DOMAIN: ${{ secrets.DEPLOY_DOMAIN }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            code=$(curl -fsS -o /dev/null -w '%{http_code}' "https://$DOMAIN/" || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "landing page: $code"
+              room=$(curl -fsS -X POST "https://$DOMAIN/api/rooms")
+              echo "created a room: $room"
+              case "$room" in *roomCode*) exit 0 ;; esac
+            fi
+            echo "attempt $attempt: HTTP $code; retrying"
+            sleep 5
+          done
+          echo "::error::the deployed site did not answer correctly"
+          exit 1
