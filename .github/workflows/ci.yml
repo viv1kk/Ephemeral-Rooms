@@ -207,7 +207,7 @@ jobs:
     # is disconnected with no warning.
     environment:
       name: production
-      url: https://${{ secrets.DEPLOY_DOMAIN }}
+      url: https://${{ vars.DEPLOY_DOMAIN }}
 
     permissions:
       contents: read
@@ -219,7 +219,7 @@ jobs:
       # Reuse the exact bundle CI tested rather than rebuilding it here. Node
       # is never installed on the instance, so the built assets have to travel.
       - name: Download the production bundle
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: frontend-dist
           path: frontend/dist
@@ -266,7 +266,7 @@ jobs:
         env:
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
-          DOMAIN: ${{ secrets.DEPLOY_DOMAIN }}
+          DOMAIN: ${{ vars.DEPLOY_DOMAIN }}
         run: |
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "$USER@$HOST" \
             "cd /tmp/ephemeral-rooms && sudo ./deploy/bootstrap.sh '$DOMAIN'"
@@ -275,7 +275,7 @@ jobs:
       # the script exited zero.
       - name: Verify the live site
         env:
-          DOMAIN: ${{ secrets.DEPLOY_DOMAIN }}
+          DOMAIN: ${{ vars.DEPLOY_DOMAIN }}
         run: |
           set -euo pipefail
           for attempt in 1 2 3 4 5; do
