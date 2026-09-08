@@ -41,7 +41,9 @@ export function Editor({ collab, documentName, userName, userColor }: EditorProp
   // Awareness carries the label and colour that y-codemirror.next renders on
   // remote cursors and selections (spec section 6).
   useEffect(() => {
-    collab.awareness.setLocalStateField('user', { name: userName, color: userColor, colorLight: `${userColor}33` });
+    // `colorLight` paints the selection range and must be valid CSS: the
+    // server emits hex precisely so this alpha suffix parses (`#rrggbb4d`).
+    collab.awareness.setLocalStateField('user', { name: userName, color: userColor, colorLight: `${userColor}4d` });
   }, [collab, userName, userColor]);
 
   useEffect(() => {
