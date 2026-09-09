@@ -81,9 +81,14 @@ class LocalCaretWidget extends WidgetType {
 
 /**
  * @param awareness  the document's awareness instance
- * @param color      this user's colour, so their flag matches their remote one
+ * @param color      reads the user's current colour. A getter rather than a
+ *                   value on purpose: passing the colour itself would make it
+ *                   part of the editor's construction dependencies, and a
+ *                   reconnect that assigns a new identity would then tear down
+ *                   and rebuild the whole EditorView - losing focus, selection
+ *                   and scroll position.
  */
-export function localCursor(awareness: Awareness, color: string): Extension {
+export function localCursor(awareness: Awareness, color: () => string): Extension {
   /** Is anyone else actually present in this document's editor? */
   const othersPresent = (): boolean => {
     for (const [clientId, state] of awareness.getStates()) {
@@ -99,7 +104,7 @@ export function localCursor(awareness: Awareness, color: string): Extension {
     if (!view.hasFocus || !othersPresent()) return Decoration.none;
     const { head } = view.state.selection.main;
     return Decoration.set([
-      Decoration.widget({ widget: new LocalCaretWidget(color), side: 1 }).range(head),
+      Decoration.widget({ widget: new LocalCaretWidget(color()), side: 1 }).range(head),
     ]);
   };
 

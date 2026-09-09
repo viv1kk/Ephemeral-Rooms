@@ -327,3 +327,61 @@ def test_a_caret_disappears_when_that_user_leaves_the_text_area(open_room) -> No
     # And it comes back when they return.
     a.click_editor()
     b.page.wait_for_selector(".cm-ySelectionCaret", timeout=15000)
+
+
+def test_a_reconnect_does_not_tear_down_the_editor(open_room) -> None:
+    """Reported as cursors and highlighting disappearing after leaving the tab
+    and coming back, and surviving several earlier attempts at a fix.
+
+    The cause was not awareness at all. An outage longer than
+    USER_RECONNECT_GRACE_MS makes the server issue a fresh identity, and a
+    fresh identity has a different colour. The colour was a dependency of the
+    effect that constructs the editor, so the whole EditorView was destroyed
+    and rebuilt: focus lost, selection cleared, scroll reset. y-codemirror only
+    publishes your cursor while the editor has focus, so the rebuild also made
+    you invisible to everyone else until you happened to click back in - which
+    is exactly why it looked like an awareness bug.
+
+    Asserted through a real disconnect rather than by inspecting React, so it
+    fails if any future change reintroduces a rebuild by another route."""
+    a = open_room("5012")
+    b = open_room("5012")
+
+    a.type("The quick brown fox")
+    b.wait_for_text("The quick brown fox")
+    a.click_editor()
+    b.click_editor()
+    b.page.wait_for_selector(".cm-ySelectionCaret", timeout=15000)
+
+    identity_before = b.user_id
+
+    # The outage has to outlast the server noticing (heartbeat timeout, 6s in
+    # the e2e config) plus USER_RECONNECT_GRACE_MS (8s). Anything shorter is
+    # resumed with the same identity and the same colour, and would not have
+    # triggered the rebuild at all - the assertion below guards against this
+    # test quietly proving nothing if those timings change.
+    b.context.set_offline(True)
+    b.page.wait_for_timeout(20000)
+    b.context.set_offline(False)
+    b.page.wait_for_selector(".status.connected", timeout=30000)
+    b.page.wait_for_timeout(4000)
+
+    assert b.user_id != identity_before, (
+        "the reconnect was resumed, so no new colour was assigned and this "
+        "test would pass whether or not the bug is present"
+    )
+
+    state = b.page.evaluate(
+        """() => ({
+            focused: document.querySelector('.cm-editor').classList.contains('cm-focused'),
+            remoteCaret: document.querySelectorAll('.cm-ySelectionCaret:not(.cm-yLocalCaret)').length,
+        })"""
+    )
+    assert state["focused"], "the editor was rebuilt across the reconnect and lost focus"
+    assert state["remoteCaret"] >= 1, "the other participant's caret did not come back"
+
+    # And the other side can still see this one, with no interaction here.
+    a.page.wait_for_function(
+        "() => document.querySelectorAll('.cm-ySelectionCaret:not(.cm-yLocalCaret)').length >= 1",
+        timeout=20000,
+    )
