@@ -256,3 +256,44 @@ def test_an_error_response_still_carries_the_security_headers(
     headers = {k.lower(): v for k, v in missing.headers.items()}
     assert "content-security-policy" in headers
     assert headers["x-content-type-options"] == "nosniff"
+
+
+def test_plain_http_behind_a_proxy_is_redirected_to_https(client: TestClient) -> None:
+    """Mozilla Observatory's redirection check, and a real gap: a tunnel that
+    forwards port 80 straight through leaves the app answering 200 over plain
+    HTTP. Nginx handles this in the bundled deployment, but nothing does when
+    the app sits directly behind a proxy."""
+    response = client.get(
+        "/room/4827",
+        headers={"X-Forwarded-Proto": "http", "Host": "rooms.example.com"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 301
+    # Same host, one hop: a scanner wants the canonical origin, not a chain.
+    assert response.headers["location"] == "https://rooms.example.com/room/4827"
+    # A permanent redirect is cacheable; do not let it outlive the config.
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_the_redirect_preserves_the_query_string(client: TestClient) -> None:
+    response = client.get(
+        "/api/storage?a=1&b=2",
+        headers={"X-Forwarded-Proto": "http", "Host": "rooms.example.com"},
+        follow_redirects=False,
+    )
+    assert response.headers["location"] == "https://rooms.example.com/api/storage?a=1&b=2"
+
+
+def test_a_request_with_no_forwarding_header_is_never_redirected(
+    client: TestClient,
+) -> None:
+    """This is what keeps local development working, and what makes a redirect
+    loop impossible: without a proxy saying otherwise, nothing is assumed."""
+    assert client.get("/api/storage", follow_redirects=False).status_code == 200
+
+
+def test_a_request_already_on_https_is_not_redirected(client: TestClient) -> None:
+    response = client.get(
+        "/api/storage", headers={"X-Forwarded-Proto": "https"}, follow_redirects=False
+    )
+    assert response.status_code == 200

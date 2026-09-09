@@ -23,6 +23,14 @@ class Settings(BaseSettings):
     DATA_ROOT: Path = Path("./.data")
     LOG_LEVEL: str = "INFO"
 
+    # Redirect plain HTTP to HTTPS when a proxy tells us the browser is on
+    # HTTP. Inert without that header, so it cannot affect local development or
+    # a direct connection - and behind the bundled Nginx it never fires either,
+    # because Nginx already redirects on port 80. It exists for proxies that
+    # forward port 80 straight through, such as a Cloudflare tunnel without
+    # "Always Use HTTPS" enabled.
+    REDIRECT_HTTP_TO_HTTPS: bool = True
+
     # --- Lifecycle timers (spec section 2.1) ------------------------------
     WS_HEARTBEAT_INTERVAL_MS: int = 20_000
     WS_HEARTBEAT_TIMEOUT_MS: int = 45_000
