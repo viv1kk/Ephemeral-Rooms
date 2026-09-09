@@ -150,10 +150,42 @@ Vite's Fast Refresh, so it is looser than the one you ship. To share or scan
 something representative, serve the built bundle from the backend instead —
 one process, and the real production headers:
 
+Build once, then point `SERVE_STATIC_DIR` at the result. The tidiest way is to
+uncomment that line in `backend/.env`, which needs no shell-specific syntax:
+
 ```bash
-cd frontend && npm run build && cd ../backend
-SERVE_STATIC_DIR=../frontend/dist .venv/bin/uvicorn app.main:app     --host 127.0.0.1 --port 8000 --workers 1
+cd frontend && npm run build            # -> frontend/dist
 ```
+
+```ini
+# backend/.env
+SERVE_STATIC_DIR=../frontend/dist
+```
+
+```bash
+cd backend
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+On Windows the launcher is `.venv\Scripts\uvicorn.exe`. Everything is then on
+**<http://127.0.0.1:8000>** — the page, the client-side routes, the API and the
+WebSocket — so that is the port to tunnel or point a browser at.
+
+To set it for a single run instead of editing `.env`:
+
+```bash
+# bash
+SERVE_STATIC_DIR=../frontend/dist .venv/bin/uvicorn app.main:app --port 8000 --workers 1
+```
+
+```powershell
+# PowerShell - an inline VAR=value prefix is a parser error here
+$env:SERVE_STATIC_DIR = "../frontend/dist"
+.venv\Scripts\uvicorn.exe app.main:app --port 8000 --workers 1
+```
+
+This serves the built files, so there is no hot reload: rebuild after any
+frontend change.
 
 Open <http://127.0.0.1:5173>, click **Create Room**, and open the resulting URL
 in a second browser window to see collaboration working.
