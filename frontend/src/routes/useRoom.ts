@@ -299,6 +299,21 @@ export function useRoom(roomCode: string): RoomStateValue {
       docClientId: collab?.doc.clientID ?? null,
       documentId: collab?.documentId ?? null,
       text: () => collab?.text.toString() ?? null,
+      // Awareness is the hardest part of this to debug from the outside: a
+      // missing caret can mean the state expired, the cursor was published as
+      // null, or the editor simply lost focus, and the DOM looks identical in
+      // all three cases.
+      awareness: () => {
+        if (collab === null) return null;
+        const states: Record<string, unknown> = {};
+        collab.awareness.getStates().forEach((state, clientId) => {
+          states[String(clientId)] = {
+            name: (state as { user?: { name?: string } }).user?.name ?? null,
+            hasCursor: (state as { cursor?: unknown }).cursor != null,
+          };
+        });
+        return { self: collab.doc.clientID, states };
+      },
     };
   }, [identity, collab]);
 

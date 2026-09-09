@@ -37,6 +37,14 @@ const languageCompartment = new Compartment();
 export function Editor({ collab, documentName, userName, userColor }: EditorProps): JSX.Element {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
+  // Held in a ref, not read directly in the effect below. A reconnect past the
+  // reconnect grace assigns a new identity and therefore a new colour, and if
+  // that were a dependency of the editor's construction the whole EditorView
+  // would be rebuilt: focus lost, selection cleared, scroll reset. Since
+  // y-codemirror only publishes your cursor while the editor has focus, the
+  // rebuild also made you invisible to everyone else until you clicked back in.
+  const colorRef = useRef(userColor);
+  colorRef.current = userColor;
   const [override, setOverride] = useState<string | null>(null);
 
   const detected = useMemo(() => languageForName(documentName), [documentName]);
@@ -79,7 +87,7 @@ export function Editor({ collab, documentName, userName, userColor }: EditorProp
       yCollab(collab.text, collab.awareness, { undoManager: collab.undoManager }),
       // yCollab deliberately skips your own caret, and never clears it on
       // blur; see editor/localCursor.ts.
-      localCursor(collab.awareness, userColor),
+      localCursor(collab.awareness, () => colorRef.current),
       keymap.of([
         ...closeBracketsKeymap,
         ...defaultKeymap,
@@ -113,7 +121,7 @@ export function Editor({ collab, documentName, userName, userColor }: EditorProp
       editor.destroy();
       view.current = null;
     };
-  }, [collab, userColor]);
+  }, [collab]);
 
   // Language modes are lazy-loaded, so the initial bundle stays small.
   useEffect(() => {
