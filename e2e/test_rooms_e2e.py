@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from conftest import ORIGIN
+from conftest import FRONTEND, ORIGIN, ROOT, _node
 
 
 def test_the_landing_page_creates_a_room_and_navigates_to_it(servers, browser_instance) -> None:
@@ -212,3 +212,108 @@ def test_upload_progress_disappears_when_the_upload_finishes(open_room) -> None:
 
     assert a.page.locator(".upload").count() == 0, "the uploader's progress row was left behind"
     assert b.page.locator(".upload.remote").count() == 0, "the observer's progress row was left behind"
+
+
+def test_the_share_menu_offers_a_qr_code_and_a_copy_button(open_room) -> None:
+    """The panel is closed until asked for, shows the QR above the copy button,
+    and dismisses the way a menu is expected to."""
+    room = open_room("6010")
+
+    # Closed to begin with.
+    assert room.page.locator("[data-testid=share-panel]").count() == 0
+    assert room.page.inner_text("[data-testid=share-button]") == "Share"
+
+    room.page.click("[data-testid=share-button]")
+    room.page.wait_for_selector("[data-testid=share-panel]", timeout=10000)
+
+    # The QR is lazily imported, so it appears a beat after the panel.
+    room.page.wait_for_selector("[data-testid=share-qr]", timeout=15000)
+
+    # It encodes this room's URL, not some other page's.
+    assert room.page.inner_text("[data-testid=share-url]").endswith("/room/6010")
+
+    # Ordering: QR above, copy button below.
+    qr_box = room.page.locator("[data-testid=share-qr]").bounding_box()
+    copy_box = room.page.locator("[data-testid=share-copy]").bounding_box()
+    assert qr_box is not None and copy_box is not None
+    assert qr_box["y"] + qr_box["height"] <= copy_box["y"], (
+        "the copy button should sit below the QR code"
+    )
+
+    # A QR that renders as a blank square would still satisfy every selector
+    # above, so check it actually drew modules.
+    modules = room.page.evaluate(
+        "() => document.querySelector('[data-testid=share-qr] path').getAttribute('d').length"
+    )
+    assert modules > 500, f"the QR path looks empty ({modules} chars)"
+
+    # Escape closes it.
+    room.page.keyboard.press("Escape")
+    room.page.wait_for_function(
+        "() => !document.querySelector('[data-testid=share-panel]')", timeout=5000
+    )
+
+    # So does clicking away.
+    room.page.click("[data-testid=share-button]")
+    room.page.wait_for_selector("[data-testid=share-panel]", timeout=10000)
+    room.page.locator(".room-status").click()
+    room.page.wait_for_function(
+        "() => !document.querySelector('[data-testid=share-panel]')", timeout=5000
+    )
+
+
+def test_the_share_panel_copies_the_room_link(open_room) -> None:
+    room = open_room("6011")
+    room.context.grant_permissions(["clipboard-read", "clipboard-write"])
+
+    room.page.click("[data-testid=share-button]")
+    room.page.wait_for_selector("[data-testid=share-copy]", timeout=10000)
+    room.page.click("[data-testid=share-copy]")
+
+    room.page.wait_for_function(
+        "() => document.querySelector('[data-testid=share-copy]').textContent.trim() === 'Copied'",
+        timeout=10000,
+    )
+    clipboard = room.page.evaluate("() => navigator.clipboard.readText()")
+    assert clipboard.endswith("/room/6011"), f"clipboard held {clipboard!r}"
+
+
+def test_the_rendered_qr_code_decodes_to_the_room_url(open_room) -> None:
+    """Scrape the QR out of the DOM and decode it, rather than trusting that an
+    <svg> with a long path is a working code.
+
+    The component emits `M{col} {row}` while indexing `matrix[row][col]`.
+    Swapping those would produce a transposed symbol that still looks like a QR
+    code and still shows finder patterns in three corners, because
+    transposition maps that set onto itself. Only a decode catches it."""
+    import json
+    import re
+    import subprocess
+
+    room = open_room("6012")
+    room.page.click("[data-testid=share-button]")
+    room.page.wait_for_selector("[data-testid=share-qr]", timeout=15000)
+
+    svg = room.page.evaluate(
+        """() => {
+            const el = document.querySelector('[data-testid=share-qr]');
+            return { viewBox: el.getAttribute('viewBox'), d: el.querySelector('path').getAttribute('d') };
+        }"""
+    )
+    size = int(svg["viewBox"].split()[2])
+    # Each dark module is drawn as `M{col} {row}h1v1h-1z`.
+    dark = [[int(row), int(col)] for col, row in re.findall(r"M(\d+) (\d+)h1v1h-1z", svg["d"])]
+    assert dark, "the QR path contained no modules"
+
+    node = _node()
+    decoded = subprocess.run(
+        [node, str(ROOT / "e2e" / "qr_decode.mjs")],
+        input=json.dumps({"size": size, "dark": dark}),
+        capture_output=True,
+        text=True,
+        cwd=FRONTEND,
+        check=True,
+    ).stdout.strip()
+
+    assert decoded.endswith("/room/6012"), f"the QR decoded to {decoded!r}"
+    assert decoded == room.page.inner_text("[data-testid=share-url]")
