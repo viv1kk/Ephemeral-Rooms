@@ -23,6 +23,7 @@ const TUNNEL_HOSTS = [
   '.ngrok-free.app',
   '.ngrok.io',
   '.loca.lt',
+  '.vikk.space'
 ];
 
 export default defineConfig({

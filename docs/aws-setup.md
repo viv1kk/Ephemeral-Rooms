@@ -184,10 +184,24 @@ Write the address down. It is referred to below as `<ELASTIC_IP>`.
 
 At your domain registrar or DNS host:
 
+For an apex domain (`example.com`):
+
 | Type | Name | Value | TTL |
 |---|---|---|---|
 | `A` | `@` (apex) | `<ELASTIC_IP>` | 300 |
 | `A` | `www` | `<ELASTIC_IP>` | 300 |
+
+For a subdomain (`rooms.example.com`), one record is all you need:
+
+| Type | Name | Value | TTL |
+|---|---|---|---|
+| `A` | `rooms` | `<ELASTIC_IP>` | 300 |
+
+**Do not add a `www.` record for a subdomain.** `bootstrap.sh` detects which
+case it is and only asks certbot for a `www.` alias on an apex domain. That
+detail matters: certbot validates every name it is given and fails the whole
+request if one of them does not resolve, and Let's Encrypt rate-limits
+failures at five per hostname per hour.
 
 A `CNAME` for `www` pointing at the apex works too. A low TTL (300s) is worth
 setting now so mistakes are cheap to correct.
@@ -301,8 +315,15 @@ You should get the landing page. If not, jump to
 On the instance:
 
 ```bash
+# apex
 sudo certbot --nginx -d example.com -d www.example.com
+
+# subdomain - one name only, because www.rooms.example.com does not exist
+sudo certbot --nginx -d rooms.example.com
 ```
+
+`bootstrap.sh` prints the exact command for your domain when it finishes, so
+you can copy it rather than deciding which of these applies.
 
 Answer the prompts: an email for expiry notices, agree to the terms, and choose
 **redirect** when it offers to redirect HTTP to HTTPS. certbot rewrites the
