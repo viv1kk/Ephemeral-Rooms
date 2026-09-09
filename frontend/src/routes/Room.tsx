@@ -14,6 +14,9 @@ export function Room(): JSX.Element {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
   const [noticeSeen, setNoticeSeen] = useState(false);
+  // Narrow screens cannot show the sidebar and the editor at once, so they
+  // swap between them. Above the breakpoint this value is inert.
+  const [pane, setPane] = useState<'editor' | 'room'>('editor');
 
   // A one-time notice, because an unknown code silently creates a room and a
   // mistype would otherwise be indistinguishable from an expired one
@@ -25,6 +28,18 @@ export function Room(): JSX.Element {
   const leave = () => {
     room.leave();
     navigate('/');
+  };
+
+  // On a phone the document list and the editor are different screens, so
+  // choosing a document has to move you to the one you just chose.
+  const openDocument = (documentId: string) => {
+    room.selectDocument(documentId);
+    setPane('editor');
+  };
+
+  const newDocument = () => {
+    room.createDocument('untitled.txt');
+    setPane('editor');
   };
 
   const active = room.documents.find((d) => d.documentId === room.activeDocumentId) ?? null;
@@ -55,7 +70,24 @@ export function Room(): JSX.Element {
         </div>
       )}
 
-      <div className="room-body">
+      <nav className="pane-tabs" aria-label="Room sections">
+        <button
+          aria-current={pane === 'editor'}
+          onClick={() => setPane('editor')}
+          data-testid="tab-editor"
+        >
+          Editor
+        </button>
+        <button
+          aria-current={pane === 'room'}
+          onClick={() => setPane('room')}
+          data-testid="tab-room"
+        >
+          Documents &amp; Files
+        </button>
+      </nav>
+
+      <div className="room-body" data-pane={pane}>
         <aside className="room-sidebar">
           <section className="panel">
             <h2>Documents</h2>
@@ -85,7 +117,7 @@ export function Room(): JSX.Element {
                     <>
                       <button
                         className="doc-name"
-                        onClick={() => room.selectDocument(doc.documentId)}
+                        onClick={() => openDocument(doc.documentId)}
                         title={doc.name}
                       >
                         {doc.name}
@@ -115,7 +147,7 @@ export function Room(): JSX.Element {
             <button
               className="primary"
               data-testid="new-document"
-              onClick={() => room.createDocument('untitled.txt')}
+              onClick={newDocument}
             >
               + New Document
             </button>

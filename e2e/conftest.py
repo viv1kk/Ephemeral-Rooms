@@ -199,8 +199,13 @@ def open_room(servers, browser_instance: Browser):
     separate users rather than two views of one session (spec section 4.1)."""
     opened: list[RoomPage] = []
 
-    def _open(room_code: str) -> RoomPage:
-        context = browser_instance.new_context()
+    def _open(room_code: str, **context_options) -> RoomPage:
+        """`context_options` are passed to Playwright's new_context, so a test
+        can ask for a phone-sized viewport with a touch screen. That matters
+        for the responsive rules: the CSS keys off pointer and hover
+        capability, and a default desktop context reports `hover: hover` no
+        matter how narrow its viewport is."""
+        context = browser_instance.new_context(**context_options)
         page = context.new_page()
         page.goto(f"{ORIGIN}/room/{room_code}")
         room = RoomPage(context, page, room_code)
