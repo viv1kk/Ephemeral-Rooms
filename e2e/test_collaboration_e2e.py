@@ -385,3 +385,60 @@ def test_a_reconnect_does_not_tear_down_the_editor(open_room) -> None:
         "() => document.querySelectorAll('.cm-ySelectionCaret:not(.cm-yLocalCaret)').length >= 1",
         timeout=20000,
     )
+
+
+def test_switching_tabs_does_not_erase_your_caret_for_others(open_room) -> None:
+    """Reported repeatedly: leave the tab, come back, cursors and highlighting
+    are gone for the people who stayed.
+
+    CodeMirror's `hasFocus` is `document.hasFocus() && activeElement is the
+    content`, so it goes false for two different reasons - the user clicked
+    elsewhere on the page, or the whole tab went to the background. Clearing
+    the published cursor on both meant switching tabs erased your caret for
+    everyone still working, and took their "You" flag with it, because that
+    only shows while another participant has a cursor.
+
+    A real tab switch cannot be produced headlessly: Playwright emulates focus
+    so background pages still report focused, and disabling that emulation has
+    no effect without a real window manager. The behaviour is verified against
+    a real browser by e2e/manual/tab_switch_check.py. This pins the branch
+    itself by stubbing the one input it reads, which is deterministic and runs
+    everywhere."""
+    a = open_room("5013")
+    b = open_room("5013")
+
+    a.type("shared text")
+    b.wait_for_text("shared text")
+    b.click_editor()
+    a.page.wait_for_selector(".cm-ySelectionCaret", timeout=15000)
+
+    # Make B look like a backgrounded tab, then blur the editor exactly as the
+    # browser does when the window loses focus.
+    b.page.evaluate(
+        """() => {
+            document.hasFocus = () => false;
+            document.querySelector('.cm-content').blur();
+        }"""
+    )
+    b.page.wait_for_timeout(2500)
+
+    still_there = a.page.evaluate(
+        "() => document.querySelectorAll('.cm-ySelectionCaret:not(.cm-yLocalCaret)').length"
+    )
+    assert still_there >= 1, (
+        "the other participant's caret was erased just because they looked at "
+        "another tab"
+    )
+
+    # The complement still has to hold: leaving the text area while the page
+    # itself is still in front does clear it, which is the behaviour that was
+    # asked for. The editor has to regain focus first, or clicking away
+    # produces no focus change for it and nothing would run either way.
+    b.page.evaluate("() => { document.hasFocus = () => true; }")
+    b.click_editor()
+    b.page.wait_for_timeout(1200)
+    b.page.locator("[data-testid=display-name]").click()
+    a.page.wait_for_function(
+        "() => document.querySelectorAll('.cm-ySelectionCaret:not(.cm-yLocalCaret)').length === 0",
+        timeout=15000,
+    )
