@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import AsyncIterator, Iterator
 
+import httpx
 import pytest
 import pytest_asyncio
 
@@ -80,13 +81,11 @@ async def services(
 
 
 @pytest_asyncio.fixture
-async def api(services: Services) -> AsyncIterator["httpx.AsyncClient"]:
+async def api(services: Services) -> AsyncIterator[httpx.AsyncClient]:
     """An HTTP client bound to the app, sharing the test's Services graph.
 
     The app is constructed without its lifespan so the boot sweep does not run
     between fixtures; the boot sweep has its own dedicated test."""
-    import httpx
-
     from app.main import create_app
 
     application = create_app(services.settings, services=services)

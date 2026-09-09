@@ -3,6 +3,13 @@ python_version = "3.12"
 strict = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
+
+# Scope note, because "mypy is clean" is easy to over-read: this checks the
+# application only. The test suite is deliberately excluded - strict mode
+# demands an annotation on every pytest fixture parameter, which is ~80 lines
+# of noise for no defect-finding value. Run mypy against `tests` explicitly if
+# you want to audit it; see docs/acceptance.md for what the check does and
+# does not cover.
 packages = ["app"]
 
 [[tool.mypy.overrides]]
