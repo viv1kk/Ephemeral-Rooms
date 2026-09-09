@@ -73,5 +73,29 @@ definition cannot be checked without a provisioned EC2 instance and a real
 domain — they are M4's gate, not M0–M3's. Everything they depend on is
 configured and documented; nothing is left to discover.
 
-Test counts at the time of writing: **100 backend tests, 17 browser tests,
-`mypy --strict` clean over 33 source files, frontend `tsc` clean.**
+Test counts at the time of writing: **104 backend tests, 22 browser tests,
+frontend `tsc` clean.**
+
+### What the type check actually covers
+
+Worth stating precisely, because "mypy is clean" is easy to over-read.
+
+`mypy` is run from `backend/` with no flags; strict mode comes from
+`[tool.mypy] strict = true` in `pyproject.toml`, so it is equivalent to
+`mypy --strict` but the flag does not appear on the command line. Strict is
+genuinely in force, verified by feeding it violations only strict catches -
+an unannotated def, a bare generic, a returned `Any`, an implicit Optional -
+and confirming each is reported.
+
+It covers **`backend/app` only**: 33 files, the application. It does not cover
+`backend/tests` or `e2e`. That exclusion is deliberate: strict mode wants an
+annotation on every pytest fixture parameter, which is around eighty of the
+hundred-odd findings and buys nothing. The remainder are mostly `Optional`
+access in assertions, plus three false positives where mypy narrows a room's
+state and cannot see that a later call mutated it.
+
+If you want to audit the tests anyway:
+
+```bash
+cd backend && .venv/bin/mypy --explicit-package-bases --namespace-packages tests
+```
