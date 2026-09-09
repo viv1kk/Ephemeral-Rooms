@@ -150,6 +150,57 @@ input, select {
 .doc-actions { opacity: 0.35; display: flex; transition: opacity 120ms; }
 .doc-list li:focus-within .doc-actions { opacity: 1; }
 
+/* ---------------- Share ---------------- */
+
+.share { position: relative; }
+
+.share-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 50;
+  width: 240px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  /* Lift it off the header rather than relying on the border alone. */
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.share-qr {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 208px;
+  /* The white plate extends the quiet zone to the panel edge, so the code
+     still scans against the dark surface behind it. */
+  background: #fff;
+  border-radius: 6px;
+  padding: 6px;
+}
+
+.share-qr .qr { width: 100%; height: auto; display: block; }
+
+.share-qr-fallback { margin: 0; color: #5c6270; font-size: 12px; text-align: center; }
+
+.share-url {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  /* A URL has no spaces to wrap on, and must not widen the panel. */
+  overflow-wrap: anywhere;
+  /* Selectable, so the link is still recoverable if the clipboard is blocked. */
+  user-select: all;
+}
+
+.share-copy { width: 100%; }
+
+.share-copy-error { margin: 0; font-size: 11px; color: var(--danger); }
+
 /* ---------------- Presence ---------------- */
 
 .presence li { display: flex; align-items: center; gap: 8px; padding: 3px 0; }

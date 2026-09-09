@@ -4,13 +4,13 @@ import { Editor } from '../editor/Editor';
 import { FilePanel } from '../files/FilePanel';
 import { formatBytes } from '../files/upload';
 import { Presence, Toasts } from '../presence/Presence';
+import { ShareMenu } from '../ui/ShareMenu';
 import { useRoom } from './useRoom';
 
 export function Room(): JSX.Element {
   const { roomCode = '' } = useParams();
   const navigate = useNavigate();
   const room = useRoom(roomCode);
-  const [copied, setCopied] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
   const [noticeSeen, setNoticeSeen] = useState(false);
@@ -21,16 +21,6 @@ export function Room(): JSX.Element {
   useEffect(() => {
     if (room.roomWasCreated && !noticeSeen) setNoticeSeen(true);
   }, [room.roomWasCreated, noticeSeen]);
-
-  const copyLink = async () => {
-    try {
-      await navigator.clipboard.writeText(window.location.href);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      /* clipboard permission denied; the URL bar still has the link */
-    }
-  };
 
   const leave = () => {
     room.leave();
@@ -52,7 +42,7 @@ export function Room(): JSX.Element {
       <header className="room-header">
         <h1>Room {roomCode}</h1>
         <div className="room-header-actions">
-          <button onClick={copyLink}>{copied ? 'Copied' : 'Copy Link'}</button>
+          <ShareMenu url={window.location.href} />
           <button className="danger" onClick={leave} data-testid="leave-room">
             Leave Room
           </button>
