@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
@@ -33,11 +34,17 @@ const TUNNEL_HOSTS = [
 // exposed through a tunnel, and a page reachable on the public internet should
 // not be missing them just because it happens to be a dev build.
 //
-// The CSP here is deliberately looser than production's in exactly one place:
 // Vite's React Fast Refresh injects an inline module preamble into the served
-// HTML, so dev needs 'unsafe-inline' for scripts. The production build has no
-// inline script at all and does not. Do not copy this policy into production -
-// scanning a tunnelled dev server measures this, not what you ship.
+// HTML, which would ordinarily force 'unsafe-inline' into script-src. Vite can
+// stamp a nonce onto what it injects instead, so dev keeps a script-src that
+// actually restricts something.
+//
+// Generated per process start and never committed, so it is not guessable from
+// the repository. This is still a development server: it is not what should be
+// exposed publicly or measured. To check the real headers, build and serve the
+// bundle from the backend instead - see docs/aws-setup.md.
+const DEV_NONCE = randomBytes(18).toString('base64');
+
 const DEV_SECURITY_HEADERS = {
   'Content-Security-Policy': [
     "default-src 'self'",
@@ -45,7 +52,7 @@ const DEV_SECURITY_HEADERS = {
     "object-src 'none'",
     "base-uri 'none'",
     "form-action 'self'",
-    "script-src 'self' 'unsafe-inline'",
+    `script-src 'self' 'nonce-${DEV_NONCE}'`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data:",
     "connect-src 'self' ws: wss:",
@@ -59,6 +66,7 @@ const DEV_SECURITY_HEADERS = {
 
 export default defineConfig({
   plugins: [react()],
+  html: { cspNonce: DEV_NONCE },
   server: {
     headers: DEV_SECURITY_HEADERS,
     // Loopback only. A tunnel client runs on this machine and dials in

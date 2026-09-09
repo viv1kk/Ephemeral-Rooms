@@ -144,6 +144,17 @@ npm run dev            # http://127.0.0.1:5173
 The Vite dev server proxies `/api` and `/ws` to the backend, so the browser
 only ever talks to one origin — the same shape Nginx provides in production.
 
+**Do not expose the dev server publicly**, through a tunnel or otherwise. It
+serves unminified source, and its Content-Security-Policy has to accommodate
+Vite's Fast Refresh, so it is looser than the one you ship. To share or scan
+something representative, serve the built bundle from the backend instead —
+one process, and the real production headers:
+
+```bash
+cd frontend && npm run build && cd ../backend
+SERVE_STATIC_DIR=../frontend/dist .venv/bin/uvicorn app.main:app     --host 127.0.0.1 --port 8000 --workers 1
+```
+
 Open <http://127.0.0.1:5173>, click **Create Room**, and open the resulting URL
 in a second browser window to see collaboration working.
 
