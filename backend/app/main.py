@@ -99,7 +99,10 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
     application.state.services = services or build_services(settings)
     # Added before the routers so it wraps every response, including the
     # streamed download and the SPA fallback below.
-    application.add_middleware(SecurityHeadersMiddleware)
+    application.add_middleware(
+        SecurityHeadersMiddleware,
+        redirect_https=settings.REDIRECT_HTTP_TO_HTTPS,
+    )
     application.include_router(http_router)
     application.include_router(ws_router)
 

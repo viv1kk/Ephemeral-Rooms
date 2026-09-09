@@ -451,7 +451,15 @@ reaching this Nginx:
 
 - **Behind a Cloudflare tunnel**, Cloudflare terminates TLS and answers port 80
   itself. Turn on **SSL/TLS → Edge Certificates → Always Use HTTPS**; Nginx
-  never sees that request.
+  never sees that request. Confirm with
+  `curl -sI http://your.domain | head -1` — a `200` means plain HTTP is being
+  served, a `301` means it is fixed.
+
+  The application also redirects on its own when a proxy reports the browser is
+  on HTTP (`REDIRECT_HTTP_TO_HTTPS`, on by default), which covers this without
+  the Cloudflare toggle — but only for requests that actually reach it. A
+  tunnel pointed at the Vite dev server bypasses the application entirely, so
+  there the Cloudflare setting is the only fix.
 - **Before certbot has run**, `bootstrap.sh` installs an HTTP-only site on
   purpose, because the TLS block cannot load without a certificate. It cannot
   redirect to HTTPS that does not exist yet. Finish

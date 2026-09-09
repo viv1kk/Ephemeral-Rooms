@@ -84,8 +84,9 @@ class SecurityHeadersMiddleware:
     point of streaming at all.
     """
 
-    def __init__(self, app: Any) -> None:
+    def __init__(self, app: Any, *, redirect_https: bool = True) -> None:
         self.app = app
+        self.redirect_https = redirect_https
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -93,6 +94,9 @@ class SecurityHeadersMiddleware:
             return
 
         secure = _is_https(scope)
+        if not secure and self.redirect_https and _proxied_over_http(scope):
+            await _redirect_to_https(scope, send)
+            return
 
         async def send_with_headers(message: MutableMapping[str, Any]) -> None:
             if message["type"] == "http.response.start":
@@ -126,3 +130,54 @@ def _is_https(scope: Scope) -> bool:
             # A chain of proxies appends, so the client-facing scheme is first.
             return value.split(b",")[0].strip() == b"https"
     return False
+
+
+def _proxied_over_http(scope: Scope) -> bool:
+    """Whether a proxy explicitly told us the browser is on plain HTTP.
+
+    Requires the header to be present and say `http`. A request with no
+    forwarding header at all is left alone, which is what keeps local
+    development and any direct connection working - and makes an accidental
+    redirect loop impossible, since a loop needs a proxy that terminates TLS
+    and then reports `http`, which is a misconfiguration of that proxy.
+    """
+    headers: list[tuple[bytes, bytes]] = list(scope.get("headers", ()))
+    for name, value in headers:
+        if name == b"x-forwarded-proto":
+            return value.split(b",")[0].strip().lower() == b"http"
+    return False
+
+
+async def _redirect_to_https(scope: Scope, send: Send) -> None:
+    """301 to the same URL on HTTPS.
+
+    Same host, so a scanner sees a single hop to the canonical origin rather
+    than a redirect chain.
+    """
+    host = b""
+    for name, value in scope.get("headers", ()):
+        if name == b"host":
+            host = value
+            break
+    if not host:
+        # Nothing to redirect to; better to serve the request than to guess.
+        await send({"type": "http.response.start", "status": 400, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+        return
+
+    path = scope.get("raw_path") or scope.get("path", "").encode()
+    if isinstance(path, str):
+        path = path.encode()
+    query = scope.get("query_string", b"")
+    target = b"https://" + host + path + (b"?" + query if query else b"")
+
+    headers = [
+        (b"location", target),
+        (b"content-length", b"0"),
+        # A permanent redirect is cacheable, so make sure the browser does not
+        # cache it against a host that later stops serving HTTPS.
+        (b"cache-control", b"no-store"),
+        *BASE_HEADERS,
+    ]
+    await send({"type": "http.response.start", "status": 301, "headers": headers})
+    await send({"type": "http.response.body", "body": b""})
