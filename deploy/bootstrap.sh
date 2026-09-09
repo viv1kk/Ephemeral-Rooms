@@ -58,6 +58,22 @@ done
     || die "'$DOMAIN' does not look like a domain name"
 [[ $DATA_ROOT = /* ]] || die "--data-root must be an absolute path"
 
+# A `www.` alias belongs to an apex domain, not to a subdomain: nobody points
+# www.rooms.example.com anywhere. It matters more than it looks, because
+# certbot validates every -d name and fails the whole request if one of them
+# does not resolve - and Let's Encrypt rate-limits failures. Two labels is
+# treated as apex. A multi-label public suffix such as example.co.uk is
+# misread as a subdomain, which only skips the alias and breaks nothing.
+if [[ $(tr -cd '.' <<<"$DOMAIN" | wc -c) -eq 1 ]]; then
+    SERVER_NAMES="$DOMAIN www.$DOMAIN"
+    CERTBOT_NAMES="-d $DOMAIN -d www.$DOMAIN"
+    IS_APEX=yes
+else
+    SERVER_NAMES="$DOMAIN"
+    CERTBOT_NAMES="-d $DOMAIN"
+    IS_APEX=no
+fi
+
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 # ----------------------------------------------------------------- preflight
@@ -106,6 +122,11 @@ ok "frontend build present"
 ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
 ok "architecture: $ARCH"
 ok "domain: $DOMAIN"
+if [[ $IS_APEX == yes ]]; then
+    ok "apex domain; a www. alias is included"
+else
+    ok "subdomain; no www. alias, which is what certbot needs here"
+fi
 ok "data root: $DATA_ROOT"
 
 # ----------------------------------------------------------------- packages
@@ -236,7 +257,12 @@ ok "service is active"
 
 step "Nginx"
 
-sed "s/example\.com/$DOMAIN/g" "$REPO/deploy/nginx.conf" > "$NGINX_SITE"
+# The template carries `server_name example.com www.example.com;`. Rewrite
+# that line wholesale before the blanket substitution, or a subdomain
+# deployment inherits a www. alias that does not resolve.
+sed -e "s/^\([[:space:]]*\)server_name .*/\1server_name $SERVER_NAMES;/" \
+    -e "s/example\.com/$DOMAIN/g" \
+    "$REPO/deploy/nginx.conf" > "$NGINX_SITE"
 sed -i "s|root /opt/ephemeral-rooms/frontend/dist;|root $INSTALL_DIR/frontend/dist;|" "$NGINX_SITE"
 
 ln -sf "$NGINX_SITE" /etc/nginx/sites-enabled/ephemeral-rooms
@@ -253,7 +279,7 @@ if [[ ! -f /etc/letsencrypt/live/$DOMAIN/fullchain.pem ]]; then
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN www.$DOMAIN;
+    server_name $SERVER_NAMES;
 
     client_max_body_size 0;
     proxy_request_buffering off;
@@ -322,13 +348,12 @@ else
      it cannot reach you, and you can be rate-limited for retrying:
 
          dig +short $DOMAIN
-         dig +short www.$DOMAIN
 
-     Both must return this instance's Elastic IP.
+     That must return this instance's Elastic IP.
 
   2. Then get the certificate. certbot rewrites the Nginx site itself:
 
-         sudo certbot --nginx -d $DOMAIN -d www.$DOMAIN
+         sudo certbot --nginx $CERTBOT_NAMES
          sudo certbot renew --dry-run
 
      Afterwards, confirm the WebSocket block still carries
