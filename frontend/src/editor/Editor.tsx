@@ -8,7 +8,13 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { EditorState, type Extension, Compartment } from '@codemirror/state';
-import { EditorView, keymap, lineNumbers, highlightActiveLine } from '@codemirror/view';
+import {
+  EditorView,
+  drawSelection,
+  highlightActiveLine,
+  keymap,
+  lineNumbers,
+} from '@codemirror/view';
 import { defaultKeymap, indentWithTab } from '@codemirror/commands';
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
 import { indentUnit, bracketMatching, foldGutter } from '@codemirror/language';
@@ -17,6 +23,7 @@ import { oneDark } from '@codemirror/theme-one-dark';
 import { yCollab } from 'y-codemirror.next';
 import type { CollabDocument } from './collab';
 import { LANGUAGES, languageById, languageForName, type LanguageOption } from './languages';
+import { localCursor } from './localCursor';
 
 interface EditorProps {
   collab: CollabDocument;
@@ -52,6 +59,13 @@ export function Editor({ collab, documentName, userName, userColor }: EditorProp
     const extensions: Extension[] = [
       lineNumbers(),
       foldGutter(),
+      // Without this CodeMirror leaves the browser to paint the selection, and
+      // the native highlight is opaque: it covers any remote selection it
+      // overlaps, so a collaborator's highlight vanishes the moment you select
+      // the same text. drawSelection renders it as a layer behind the content
+      // instead, leaving the remote marks - which sit on the text itself -
+      // visible through it.
+      drawSelection(),
       highlightActiveLine(),
       highlightSelectionMatches(),
       bracketMatching(),
@@ -63,6 +77,9 @@ export function Editor({ collab, documentName, userName, userColor }: EditorProp
       // The Yjs binding, including remote cursors. Passing the UndoManager
       // here is what scopes undo to this user.
       yCollab(collab.text, collab.awareness, { undoManager: collab.undoManager }),
+      // yCollab deliberately skips your own caret, and never clears it on
+      // blur; see editor/localCursor.ts.
+      localCursor(collab.awareness, userColor),
       keymap.of([
         ...closeBracketsKeymap,
         ...defaultKeymap,
@@ -96,7 +113,7 @@ export function Editor({ collab, documentName, userName, userColor }: EditorProp
       editor.destroy();
       view.current = null;
     };
-  }, [collab]);
+  }, [collab, userColor]);
 
   // Language modes are lazy-loaded, so the initial bundle stays small.
   useEffect(() => {

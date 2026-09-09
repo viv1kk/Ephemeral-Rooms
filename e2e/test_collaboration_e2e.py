@@ -233,3 +233,97 @@ def test_a_remote_selection_is_highlighted_in_the_selecting_users_colour(open_ro
     assert float(label["opacity"]) > 0.9, (
         f"the label is present but invisible (opacity {label['opacity']})"
     )
+
+
+def test_a_remote_selection_survives_your_own_selection_overlapping_it(open_room) -> None:
+    """Reported as selection highlighting being inconsistent, and reproducible.
+
+    CodeMirror leaves the browser to paint the selection unless drawSelection()
+    is enabled, and the native highlight is opaque: it covered any remote
+    selection it overlapped, so a collaborator's highlight vanished the moment
+    you selected the same text. The marks were in the DOM the whole time, which
+    is why it looked intermittent rather than broken.
+
+    drawSelection() renders the local selection as a layer behind the content,
+    leaving the remote marks - which sit on the text itself - visible through
+    it."""
+    a = open_room("5009")
+    b = open_room("5009")
+
+    a.type("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    b.wait_for_text("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+    a.click_editor()
+    a.page.keyboard.press("Home")
+    for _ in range(20):
+        a.page.keyboard.press("Shift+ArrowRight")
+    b.page.wait_for_selector(".cm-ySelection", timeout=15000)
+    before = b.page.locator(".cm-ySelection").count()
+    assert before >= 1
+
+    # B now selects a range overlapping A's.
+    b.click_editor()
+    b.page.keyboard.press("Home")
+    for _ in range(12):
+        b.page.keyboard.press("Shift+ArrowRight")
+    b.page.wait_for_timeout(600)
+
+    assert b.page.locator(".cm-ySelection").count() >= 1, (
+        "the remote selection left the DOM once the local one overlapped it"
+    )
+
+    # The selection is drawn by CodeMirror behind the content, not by the
+    # browser on top of it. Without this the marks above would still be present
+    # and still be invisible, so asserting their presence alone proves nothing.
+    layer = b.page.evaluate(
+        """() => {
+            const el = document.querySelector('.cm-selectionLayer');
+            return el === null ? null : Number(getComputedStyle(el).zIndex);
+        }"""
+    )
+    assert layer is not None, "drawSelection() is not active; the browser is painting the selection"
+    assert layer < 0, f"the selection layer is not behind the text (z-index {layer})"
+
+
+def test_your_own_caret_is_flagged_once_someone_else_is_editing(open_room) -> None:
+    """Every other caret is a labelled colour flag; without this yours is a
+    thin blinking line, which is the hardest one to find."""
+    a = open_room("5010")
+    a.click_editor()
+    a.page.wait_for_timeout(400)
+
+    # Alone, the flag would be pure clutter.
+    assert a.page.locator(".cm-yLocalCaret").count() == 0
+
+    b = open_room("5010")
+    b.click_editor()
+    a.page.wait_for_timeout(900)
+
+    a.page.wait_for_selector(".cm-yLocalCaret", timeout=10000)
+    assert a.page.inner_text(".cm-yLocalCaret .cm-ySelectionInfo") == "You"
+
+
+def test_a_caret_disappears_when_that_user_leaves_the_text_area(open_room) -> None:
+    """y-codemirror.next never clears the published cursor on blur - its guard
+    requires focus to be true inside the branch reached only when focus is
+    false - so a caret stayed parked on everyone else's screen for the life of
+    the tab."""
+    a = open_room("5011")
+    b = open_room("5011")
+
+    a.type("shared text")
+    b.wait_for_text("shared text")
+    a.click_editor()
+    b.page.wait_for_selector(".cm-ySelectionCaret", timeout=15000)
+
+    # A clicks away from the editor, into the display-name field.
+    a.page.locator("[data-testid=display-name]").click()
+
+    b.page.wait_for_function(
+        "() => document.querySelectorAll('.cm-ySelectionCaret:not(.cm-yLocalCaret)').length === 0",
+        timeout=15000,
+    )
+
+    # And it comes back when they return.
+    a.click_editor()
+    b.page.wait_for_selector(".cm-ySelectionCaret", timeout=15000)

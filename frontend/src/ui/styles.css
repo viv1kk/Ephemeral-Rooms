@@ -273,7 +273,7 @@ input, select {
    hue everywhere (spec section 6). */
 
 /* The library hides the name label behind `:hover` on the caret, which is a
-   1px-wide target — so in practice you could never tell who was selecting.
+   1px-wide target - so in practice you could never tell who was selecting.
    Show it always. The selector is more specific than the library's injected
    base theme, which is what lets it win. */
 .cm-editor .cm-ySelectionInfo {
@@ -292,6 +292,22 @@ input, select {
 /* Give the highlighted range a soft edge rather than a hard block. */
 .cm-editor .cm-ySelection {
   border-radius: 2px;
+}
+
+/* Your own selection, drawn by drawSelection() as a layer behind the text
+   rather than by the browser. Kept translucent so a collaborator's highlight
+   underneath reads through it instead of being painted over. */
+.cm-editor .cm-selectionBackground,
+.cm-editor.cm-focused .cm-selectionBackground,
+.cm-editor .cm-content ::selection {
+  background: rgba(120, 150, 200, 0.3);
+}
+
+/* Your own caret flag. Same shape as the remote ones, deliberately quieter:
+   it is a landmark for finding yourself, not a notification. */
+.cm-editor .cm-yLocalCaret > .cm-ySelectionInfo {
+  opacity: 0.8;
+  font-style: italic;
 }
 
 /* The label sits at -1.05em above its caret, so a selection on the first line
