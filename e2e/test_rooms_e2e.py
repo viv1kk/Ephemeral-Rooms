@@ -317,3 +317,84 @@ def test_the_rendered_qr_code_decodes_to_the_room_url(open_room) -> None:
 
     assert decoded.endswith("/room/6012"), f"the QR decoded to {decoded!r}"
     assert decoded == room.page.inner_text("[data-testid=share-url]")
+
+
+PHONE = {"viewport": {"width": 390, "height": 844}, "has_touch": True, "is_mobile": True}
+TABLET = {"viewport": {"width": 820, "height": 1180}, "has_touch": True}
+WIDE = {"viewport": {"width": 2560, "height": 1200}}
+
+
+def test_the_phone_layout_shows_one_pane_at_a_time(open_room) -> None:
+    """A 320px sidebar beside an editor does not fit a 390px screen, so the two
+    become separate views with a switcher."""
+    room = open_room("6013", **PHONE)
+
+    # The switcher is only for narrow screens.
+    assert room.page.locator(".pane-tabs").is_visible()
+
+    # Editor first, sidebar out of the way.
+    assert room.page.locator(".room-main").is_visible()
+    assert not room.page.locator(".room-sidebar").is_visible()
+
+    room.page.click("[data-testid=tab-room]")
+    assert room.page.locator(".room-sidebar").is_visible()
+    assert not room.page.locator(".room-main").is_visible()
+
+    # Choosing a document should take you to it rather than leaving you on
+    # the list, which on a phone is a different screen.
+    room.page.locator(".doc-name").first.click()
+    assert room.page.locator(".room-main").is_visible()
+    assert not room.page.locator(".room-sidebar").is_visible()
+
+
+def test_nothing_overflows_horizontally_at_any_size(open_room) -> None:
+    """A sideways scrollbar is the classic responsive failure, and it is
+    invisible in a screenshot taken at the wrong width."""
+    for label, options in (("phone", PHONE), ("tablet", TABLET), ("wide", WIDE)):
+        room = open_room("6014", **options)
+        room.page.wait_for_timeout(250)
+        overflow = room.page.evaluate(
+            "() => document.documentElement.scrollWidth - document.documentElement.clientWidth"
+        )
+        assert overflow <= 0, f"{label} scrolls sideways by {overflow}px"
+
+
+def test_touch_targets_are_large_enough_on_a_touch_screen(open_room) -> None:
+    """Both Apple and Google publish 44px as the minimum comfortable target.
+    The desktop button is 30px, so the rules keyed off `pointer: coarse` have
+    to actually be applying."""
+    room = open_room("6015", **PHONE)
+
+    assert room.page.evaluate("() => matchMedia('(pointer: coarse)').matches"), (
+        "the emulated device did not report a coarse pointer, so this proves nothing"
+    )
+
+    for selector in ("[data-testid=leave-room]", "[data-testid=tab-room]"):
+        box = room.page.locator(selector).bounding_box()
+        assert box is not None and box["height"] >= 44, f"{selector} is {box}"
+
+
+def test_hover_only_controls_are_visible_without_hover(open_room) -> None:
+    """Rename and Delete are dimmed until hover on a desktop. A touch screen
+    cannot hover, so they would be permanently faint."""
+    room = open_room("6016", **PHONE)
+    room.page.click("[data-testid=tab-room]")
+
+    opacity = room.page.evaluate(
+        "() => getComputedStyle(document.querySelector('.doc-actions')).opacity"
+    )
+    assert float(opacity) > 0.9, f"document actions are dimmed at {opacity} with no way to hover"
+
+
+def test_both_panes_are_visible_side_by_side_on_a_desktop(open_room) -> None:
+    room = open_room("6017", **WIDE)
+
+    assert not room.page.locator(".pane-tabs").is_visible()
+    assert room.page.locator(".room-sidebar").is_visible()
+    assert room.page.locator(".room-main").is_visible()
+
+    sidebar = room.page.locator(".room-sidebar").bounding_box()
+    main = room.page.locator(".room-main").bounding_box()
+    assert sidebar is not None and main is not None
+    # Side by side, not stacked.
+    assert main["x"] >= sidebar["x"] + sidebar["width"] - 1

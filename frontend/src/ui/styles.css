@@ -86,7 +86,15 @@ input, select {
 
 /* ---------------- Room shell ---------------- */
 
-.room { height: 100%; display: flex; flex-direction: column; }
+.room {
+  height: 100%;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Only shown on narrow screens; see the breakpoints at the end of the file. */
+.pane-tabs { display: none; }
 
 .room-header {
   display: flex;
@@ -318,3 +326,142 @@ input, select {
   max-width: 340px;
 }
 .toast.error { border-color: #5a3a3a; color: var(--danger); }
+
+
+/* ================================================================
+   Responsive layout
+   ================================================================
+
+   Three things change with width, in this order of importance:
+
+   1. Below 720px the sidebar and the editor cannot coexist - a 320px
+      sidebar on a 375px phone leaves the editor about 55px - so they
+      become two screens with a switcher.
+   2. Between 720px and 1080px both fit, but the sidebar has to give up
+      width to keep the editor usable.
+   3. Above 1600px the sidebar grows rather than leaving the editor
+      absurdly wide next to a narrow column.
+
+   Touch handling is keyed off pointer/hover capability rather than width,
+   because a small window on a desktop still has a mouse and a large tablet
+   does not. */
+
+/* ---------------- Phones: one pane at a time ---------------- */
+
+@media (max-width: 719px) {
+  .pane-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .pane-tabs button { padding: 9px 12px; }
+  .pane-tabs button[aria-current='true'] {
+    background: #23324d;
+    border-color: #35507d;
+    color: var(--text);
+  }
+
+  /* Each pane takes the full width; the switcher decides which is mounted
+     in view. Both stay in the DOM so the editor keeps its scroll position
+     and its CodeMirror instance is never torn down. */
+  .room-body { display: block; position: relative; }
+  .room-sidebar,
+  .room-main {
+    width: 100%;
+    border-right: none;
+    height: 100%;
+  }
+  .room-body[data-pane='editor'] .room-sidebar { display: none; }
+  .room-body[data-pane='room'] .room-main { display: none; }
+
+  .room-header { padding: 9px 12px; }
+  .room-header h1 { font-size: 15px; }
+  .room-header-actions { gap: 6px; }
+
+  .panel { padding: 12px; }
+  .notice { padding: 8px 12px; font-size: 13px; }
+
+  /* Three items at 24px gaps overflow a 360px screen. */
+  .room-status {
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    padding: 6px 12px;
+  }
+
+  /* Anchored to the right edge of a button that is itself near the edge,
+     so cap it rather than letting it push the page sideways. */
+  .share-panel {
+    width: min(240px, calc(100vw - 24px));
+  }
+
+  .toasts {
+    right: 12px;
+    left: 12px;
+    bottom: 12px;
+  }
+  .toast { max-width: none; }
+
+  .landing-card { padding: 0 20px; }
+  .landing-card h1 { font-size: 25px; }
+
+  /* Stacked rather than side by side, so the filename is not squeezed to
+     an ellipsis by the buttons next to it. */
+  .file-actions { flex-wrap: wrap; }
+}
+
+/* ---------------- Tablets: both panes, narrower sidebar ---------------- */
+
+@media (min-width: 720px) and (max-width: 1079px) {
+  .room-sidebar { width: 256px; }
+  .panel { padding: 12px 13px; }
+  .share-panel { width: 224px; }
+}
+
+/* ---------------- Large screens ---------------- */
+
+@media (min-width: 1600px) {
+  .room-sidebar { width: 380px; }
+  .share-panel { width: 280px; }
+
+  /* Line wrapping is on, so without a cap a wrapped line runs the full width
+     of an ultrawide display and becomes hard to track back to the next line.
+     The gutter stays put; only the text column is bounded. Generous enough
+     that ordinary code is unaffected. */
+  .cm-editor .cm-content { max-width: 120ch; }
+}
+
+/* ---------------- Touch and hover capability ---------------- */
+
+/* A coarse pointer needs a target it can actually hit. 44px is the figure
+   both Apple and Google publish; the default 30px button is not enough. */
+@media (pointer: coarse) {
+  button,
+  a.button,
+  .pane-tabs button {
+    min-height: 44px;
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+  button.link {
+    min-height: 36px;
+    padding: 6px 8px;
+  }
+  input, select { min-height: 40px; }
+  .file-actions .button,
+  .file-actions button { min-height: 38px; font-size: 13px; }
+}
+
+/* Without hover there is no way to reveal a hover-only control, so the
+   document actions stay at full strength. */
+@media (hover: none) {
+  .doc-actions { opacity: 1; }
+}
+
+/* ---------------- Reduced motion ---------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.01ms !important; }
+}
