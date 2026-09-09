@@ -130,6 +130,19 @@ export function localCursor(awareness: Awareness, color: () => string): Extensio
   // screens; see the note at the top of this file.
   const clearOnBlur = EditorView.updateListener.of((update) => {
     if (!update.focusChanged || update.view.hasFocus) return;
+
+    // CodeMirror's `hasFocus` is `document.hasFocus() && activeElement is the
+    // content`, so it goes false for two quite different reasons: the user
+    // clicked somewhere else on the page, or the whole tab went to the
+    // background. Only the first means they left the text area.
+    //
+    // Treating them alike is wrong and was reported as a bug: switching tabs
+    // to look something up erased your caret for everyone still working, and
+    // took their "You" flag with it, since that only shows while someone else
+    // has a cursor. Someone reading another tab is still parked where they
+    // left off, so their caret should stay exactly where it is.
+    if (!update.view.dom.ownerDocument.hasFocus()) return;
+
     if (awareness.getLocalState()?.['cursor'] != null) {
       awareness.setLocalStateField('cursor', null);
     }

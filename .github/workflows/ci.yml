@@ -139,8 +139,10 @@ jobs:
       # independent browser contexts against them, and proves that browser yjs
       # and server pycrdt converge on the same binary format. A pure-Python
       # test of pycrdt against itself would prove nothing about that.
+      # e2e/manual holds a headed reproduction that needs a real window
+      # manager to be meaningful; it is documented and run by hand.
       - name: Run end-to-end tests
-        run: pytest e2e -q
+        run: pytest e2e -q --ignore=e2e/manual
 
   pinned-versions:
     name: Pinned CRDT versions match the README
