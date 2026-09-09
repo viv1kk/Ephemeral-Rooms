@@ -26,9 +26,41 @@ const TUNNEL_HOSTS = [
   '.vikk.space'
 ];
 
+// Security headers for the dev server.
+//
+// Production gets these from Nginx and from the application itself
+// (backend/app/security.py); this exists because the dev server is sometimes
+// exposed through a tunnel, and a page reachable on the public internet should
+// not be missing them just because it happens to be a dev build.
+//
+// The CSP here is deliberately looser than production's in exactly one place:
+// Vite's React Fast Refresh injects an inline module preamble into the served
+// HTML, so dev needs 'unsafe-inline' for scripts. The production build has no
+// inline script at all and does not. Do not copy this policy into production -
+// scanning a tunnelled dev server measures this, not what you ship.
+const DEV_SECURITY_HEADERS = {
+  'Content-Security-Policy': [
+    "default-src 'self'",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "connect-src 'self' ws: wss:",
+  ].join('; '),
+  'Referrer-Policy': 'no-referrer',
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Resource-Policy': 'same-origin',
+};
+
 export default defineConfig({
   plugins: [react()],
   server: {
+    headers: DEV_SECURITY_HEADERS,
     // Loopback only. A tunnel client runs on this machine and dials in
     // locally, so it does not need the server exposed on the LAN.
     host: '127.0.0.1',

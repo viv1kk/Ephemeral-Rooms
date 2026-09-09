@@ -195,3 +195,64 @@ def test_the_test_settings_ignore_a_local_env_file(tmp_path, monkeypatch) -> Non
 
     # The settings the suite actually runs against must ignore it.
     assert make_test_settings(tmp_path / "data").MAX_ROOMS == 200
+
+
+# ----------------------------------------------------------------------
+# Security headers
+# ----------------------------------------------------------------------
+
+
+def test_security_headers_are_present_on_every_response(client: TestClient) -> None:
+    """Scored by Mozilla Observatory, and each one earns its place."""
+    response = client.post("/api/rooms")
+    headers = {k.lower(): v for k, v in response.headers.items()}
+
+    csp = headers["content-security-policy"]
+    # The two that matter most: nothing may frame this, and no inline script
+    # may run. Both were failing before these headers existed.
+    assert "frame-ancestors 'none'" in csp
+    assert "script-src 'self'" in csp
+    assert "'unsafe-eval'" not in csp
+    # style-src is the one documented relaxation; script-src must never gain it.
+    script_directive = next(p for p in csp.split("; ") if p.startswith("script-src"))
+    assert "'unsafe-inline'" not in script_directive
+
+    assert headers["x-frame-options"] == "DENY"
+    assert headers["x-content-type-options"] == "nosniff"
+    assert headers["referrer-policy"] == "no-referrer"
+    assert headers["cross-origin-opener-policy"] == "same-origin"
+    assert headers["cross-origin-resource-policy"] == "same-origin"
+
+
+def test_hsts_is_sent_only_over_https(client: TestClient) -> None:
+    """A browser ignores HSTS on a plain connection, and sending it there would
+    make local development look secure when it is not. Uvicorn sits on loopback
+    behind the proxy, so the proxy's X-Forwarded-Proto is what says whether the
+    browser is actually on HTTPS."""
+    plain = client.post("/api/rooms")
+    assert "strict-transport-security" not in {k.lower() for k in plain.headers}
+
+    forwarded = client.post("/api/rooms", headers={"X-Forwarded-Proto": "https"})
+    hsts = forwarded.headers["strict-transport-security"]
+    # Six months is Observatory's threshold; a year is its preload threshold.
+    assert int(hsts.split("max-age=")[1].split(";")[0]) >= 31_536_000
+    assert "includeSubDomains" in hsts and "preload" in hsts
+
+    # A proxy chain appends, so the client-facing scheme is the first entry.
+    chained = client.post("/api/rooms", headers={"X-Forwarded-Proto": "https, http"})
+    assert "strict-transport-security" in {k.lower() for k in chained.headers}
+
+
+def test_an_error_response_still_carries_the_security_headers(
+    client: TestClient,
+) -> None:
+    """The middleware must not clobber what a route already set, and must not
+    buffer a streaming response."""
+    created = client.post("/api/rooms")
+    code = created.json()["roomCode"]
+
+    missing = client.get(f"/api/rooms/{code}/files/not-a-uuid")
+    assert missing.status_code == 404
+    headers = {k.lower(): v for k, v in missing.headers.items()}
+    assert "content-security-policy" in headers
+    assert headers["x-content-type-options"] == "nosniff"

@@ -30,6 +30,7 @@ from app.cleanup.boot import sweep_data_root
 from app.config import Settings, get_settings
 from app.deps import Services, build_services
 from app.files.routes import router as http_router
+from app.security import SecurityHeadersMiddleware
 from app.ws.routes import router as ws_router
 
 log = logging.getLogger(__name__)
@@ -96,6 +97,9 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
         openapi_url=None,
     )
     application.state.services = services or build_services(settings)
+    # Added before the routers so it wraps every response, including the
+    # streamed download and the SPA fallback below.
+    application.add_middleware(SecurityHeadersMiddleware)
     application.include_router(http_router)
     application.include_router(ws_router)
 

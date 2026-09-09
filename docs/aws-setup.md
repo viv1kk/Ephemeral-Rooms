@@ -405,6 +405,79 @@ room through it.
 
 ---
 
+## Security headers
+
+Set in three places so they hold however the app is reached:
+`deploy/security-headers.conf` (Nginx), `backend/app/security.py` (the
+application itself, which covers proxied responses and the SPA fallback), and
+the Vite dev server for the case where it is tunnelled.
+
+What is sent, and the two decisions worth knowing:
+
+| Header | Value |
+|---|---|
+| `Content-Security-Policy` | `default-src 'self'` with `frame-ancestors 'none'`, `object-src 'none'`, `base-uri 'none'` |
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains; preload` |
+| `Referrer-Policy` | `no-referrer` |
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `Cross-Origin-Opener-Policy` | `same-origin` |
+| `Cross-Origin-Resource-Policy` | `same-origin` |
+| `Permissions-Policy` | every feature denied |
+
+**`script-src` has no `'unsafe-inline'`,** because the built page contains no
+inline script at all — that is where most of the value in a CSP is.
+
+**`style-src` does have it, and cannot avoid it.** CodeMirror injects its theme
+through a runtime `<style>` element and y-codemirror paints remote selections
+with a `style` attribute on each decoration. Tightening it was tested: every
+collaborator's highlight renders transparent and the browser blocks seven
+inline styles. Mozilla Observatory does not penalise `'unsafe-inline'` when it
+is confined to `style-src`.
+
+### An Nginx trap worth knowing
+
+`add_header` in a `server` block is inherited by a `location` **only if that
+location declares no `add_header` of its own**. The `/assets/` location sets
+`Cache-Control`, which silently discards every inherited security header for
+those responses. That is why the headers live in an included snippet that is
+pulled into both places, rather than being written once in the server block.
+
+### If the HTTPS redirect is still reported as missing
+
+The Nginx site returns `301 https://$host$request_uri` from port 80, which is
+what a scanner wants. If a scan still reports no redirect, the request is not
+reaching this Nginx:
+
+- **Behind a Cloudflare tunnel**, Cloudflare terminates TLS and answers port 80
+  itself. Turn on **SSL/TLS → Edge Certificates → Always Use HTTPS**; Nginx
+  never sees that request.
+- **Before certbot has run**, `bootstrap.sh` installs an HTTP-only site on
+  purpose, because the TLS block cannot load without a certificate. It cannot
+  redirect to HTTPS that does not exist yet. Finish
+  [Step 8](#step-8--turn-on-https) and the redirect appears.
+
+### Scanning the right thing
+
+A tunnel pointed at the Vite dev server is not what you ship. Its CSP is
+deliberately looser — Vite's React Fast Refresh injects an inline module
+script, so dev needs `'unsafe-inline'` for scripts and production does not. To
+check the real headers without deploying, serve the production build from
+Uvicorn:
+
+```bash
+cd frontend && npm run build && cd ../backend
+SERVE_STATIC_DIR=../frontend/dist .venv/bin/uvicorn app.main:app --port 8000 --workers 1
+```
+
+### HSTS preloading
+
+`max-age` is already two years with `includeSubDomains` and `preload`, so the
+domain is eligible. Submitting it at <https://hstspreload.org/> is a one-way
+door in practice: every subdomain of it must serve HTTPS, permanently.
+
+---
+
 ## Ongoing operations
 
 ```bash

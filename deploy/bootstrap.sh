@@ -257,6 +257,12 @@ ok "service is active"
 
 step "Nginx"
 
+# The site file includes this snippet by absolute path, so it has to be
+# in place before `nginx -t` runs.
+mkdir -p /etc/nginx/snippets
+install -m 644 "$REPO/deploy/security-headers.conf" /etc/nginx/snippets/ephemeral-rooms-security.conf
+ok "security headers snippet installed"
+
 # The template carries `server_name example.com www.example.com;`. Rewrite
 # that line wholesale before the blanket substitution, or a subdomain
 # deployment inherits a www. alias that does not resolve.
@@ -288,6 +294,8 @@ server {
     index index.html;
 
     location /.well-known/acme-challenge/ { root /var/www/html; }
+
+    include /etc/nginx/snippets/ephemeral-rooms-security.conf;
 
     location /ws {
         proxy_pass http://127.0.0.1:8000;
