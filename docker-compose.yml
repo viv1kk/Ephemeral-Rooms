@@ -196,23 +196,19 @@ services:
         # first visitor after a reboot gets a 502 from the edge.
         condition: service_healthy
 
-    # `--url` instead of an ingress config file, deliberately. This tunnel
-    # serves one hostname backed by one service, which is exactly what --url
-    # expresses - and it keeps the hostname out of the repository, where
-    # nothing else hardcodes a domain either (spec section 31). The hostname
-    # lives in the Cloudflare DNS record that points at this tunnel's UUID.
+    # An ingress config file rather than `--url`, because this tunnel now routes
+    # two services: the application, and the deploy webhook that lets CI tell
+    # Watchtower to check now instead of waiting out a poll interval. `--url` is
+    # shorthand for a single catch-all rule and cannot express that; the two are
+    # mutually exclusive, so it is gone.
     #
-    # Add deploy/docker/cloudflared/config.yml and mount it at
-    # /etc/cloudflared/config.yml if you ever need real ingress rules - several
-    # hostnames, path routing, per-origin timeouts.
-    #
-    # http://web:80, not the backend: everything public goes through Nginx, so
-    # static assets, the SPA fallback and the security headers all behave the
-    # same way they do locally.
+    # The rules match on path only and name no hostname, which is what keeps the
+    # domain out of the repository (spec section 31). See the file for why that
+    # is sufficient here.
     command: >-
       tunnel
       --metrics 0.0.0.0:2000
-      --url http://web:80
+      --config /etc/cloudflared/config.yml
       run
       ${CF_TUNNEL_ID:?set CF_TUNNEL_ID in .env - see .env.example}
 
@@ -222,6 +218,10 @@ services:
       # create and delete tunnels, and `tunnel run` does not need it when the
       # tunnel is identified by UUID.
       - ${CF_CREDENTIALS_FILE:?set CF_CREDENTIALS_FILE in .env - see .env.example}:/etc/cloudflared/creds.json:ro
+
+      # Read-only: cloudflared never writes here, and a tunnel that could
+      # rewrite its own routing is a strange thing to allow.
+      - ./deploy/docker/cloudflared/config.yml:/etc/cloudflared/config.yml:ro
 
     environment:
       # Passed by environment rather than as a flag because --cred-file is a
@@ -316,6 +316,40 @@ services:
       # publish images even if it is compromised.
       REPO_USER: ${DOCKERHUB_USERNAME:-}
       REPO_PASS: ${DOCKERHUB_READ_TOKEN:-}
+
+      # ------------------------------------------------- The deploy webhook
+      #
+      # Polling alone means a release sits published-but-not-running for up to
+      # WATCHTOWER_POLL_INTERVAL. Shortening that interval is the obvious fix
+      # and the wrong one: every check is a manifest request against Docker
+      # Hub's pull limit, so two images at one-minute polls is a few thousand
+      # requests a day, and hitting that limit looks exactly like "the deploy
+      # silently stopped working".
+      #
+      # So the check is triggered instead. CI POSTs to /v1/update the moment
+      # `promote` has moved :latest, the tunnel routes that one path here, and
+      # the update runs in seconds. No inbound port is opened - the tunnel is
+      # outbound, like everything else on this machine - and no credential for
+      # this machine exists in CI beyond the token below.
+      WATCHTOWER_HTTP_API_ENDPOINTS: update
+
+      # Required whenever a non-health endpoint is enabled; Watchtower refuses
+      # to start without it, which is the right way round. Generate a fresh
+      # value rather than reusing anything - see .env.example.
+      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_HTTP_TOKEN:?set WATCHTOWER_HTTP_TOKEN in .env - see .env.example}
+
+      # Keep polling as well as listening. Without this, enabling the API turns
+      # the poll OFF entirely and the webhook becomes a single point of failure:
+      # a release published while this machine was asleep, or a webhook call
+      # that failed, would never land at all. The poll is the floor, the webhook
+      # is the fast path.
+      WATCHTOWER_HTTP_API_PERIODIC_POLLS: "true"
+
+    # Deliberately not published to the host. The tunnel reaches this over the
+    # compose network by service name; binding it to a host port would expose
+    # an update trigger on the LAN for no benefit.
+    expose:
+      - "8080"
 
 
 volumes:

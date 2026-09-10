@@ -546,6 +546,63 @@ jobs:
             echo "- \`${ns}/ephemeral-rooms-backend:latest\`"
             echo "- \`${ns}/ephemeral-rooms-web:latest\`"
             echo ""
-            echo "Watchtower recreates both containers on its next poll (default 15 min)."
             echo "Recreating the backend destroys every live room, document and upload."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------------------------------------------------------------
+      # Tell the deployment machine to look NOW.
+      #
+      # Without this the release is published but not running until Watchtower
+      # next polls - up to WATCHTOWER_POLL_INTERVAL, 15 minutes by default.
+      # Shortening that interval is the obvious fix and the wrong one: every
+      # poll is a manifest request against Docker Hub's pull limit, and hitting
+      # that limit presents as "the deploy silently stopped working".
+      #
+      # The machine has no inbound port and no SSH; the tunnel it already runs
+      # routes this one path to Watchtower's /v1/update endpoint, so this is an
+      # ordinary HTTPS request to the public hostname. What the token permits is
+      # narrow: it makes Watchtower check the registry and pull :latest, which
+      # is the image this job just published. It cannot name a different one.
+      #
+      # Deliberately NOT a failure of the release. The images are published and
+      # :latest has moved by this point - that is the release, and it is done.
+      # If the machine is asleep, offline, or mid-reboot, the poll picks the
+      # same images up later on its own. Failing here would turn a slow deploy
+      # into a red build and tempt someone to re-run a workflow that has
+      # already succeeded.
+      #
+      # The "is it configured?" test is inside the script rather than in an
+      # `if:`, because the `secrets` context is not available to a step
+      # condition - `if: secrets.X != ''` is not falsy there, it is invalid.
+      - name: Trigger the deployment
+        continue-on-error: true
+        env:
+          HOOK: ${{ secrets.DEPLOY_HOOK_URL }}
+          TOKEN: ${{ secrets.WATCHTOWER_HTTP_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${HOOK:-}" ]; then
+            echo "No DEPLOY_HOOK_URL secret; leaving this release to the poll."
+            exit 0
+          fi
+          # --retry covers a machine that is briefly unreachable; the poll
+          # covers one that is properly away.
+          code=$(
+            curl -sS -o /tmp/hook.out -w '%{http_code}' \
+              --max-time 120 --retry 2 --retry-delay 5 \
+              -X POST -H "Authorization: Bearer $TOKEN" \
+              "$HOOK" || echo 000
+          )
+          echo "webhook returned HTTP $code"
+          # POST, not GET: this endpoint answers 405 to a GET, which would look
+          # like a routing problem rather than a wrong verb.
+          #
+          # The body is a JSON summary naming how many containers were scanned
+          # and updated, and is the only view of that from this side of the
+          # tunnel - so it is printed whatever the status was.
+          sed -n '1,40p' /tmp/hook.out || true
+          if [ "$code" = "200" ]; then
+            echo "Deployment triggered; containers recreate within seconds." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Deploy webhook returned $code - the release is published, and Watchtower will pick it up on its next poll." >> "$GITHUB_STEP_SUMMARY"
+          fi
