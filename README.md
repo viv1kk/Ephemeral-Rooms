@@ -890,8 +890,9 @@ docker compose logs -f watchtower
 #    -> "Update session completed ... scanned=1"
 #       scanned=1 is the safety property: backend and tunnel are NOT in scope.
 
-# 5. Wait one poll interval (default 15 min), or force a check now:
-docker compose restart watchtower
+# 5. Wait one poll interval (default 15 min), or force a check now with a
+#    one-off container (restarting the service does NOT force one - see below):
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock   nickfedor/watchtower:1.22.1 --label-enable --run-once
 
 # 6. Did the container actually change?
 docker compose ps web
@@ -901,8 +902,21 @@ docker inspect -f '{{.Image}}' $(docker compose ps -q web)
 curl -I https://<your-domain>/
 ```
 
-To force an immediate check without waiting for the interval, restart the
-Watchtower container — it polls once on start.
+**Restarting the Watchtower service does not force a check** — it only resets
+the timer, logging `Next scheduled run: ... in 14 minutes 59 seconds` and doing
+nothing until then. That is worth knowing before you use it as a diagnostic:
+restart, see no update, and it is easy to conclude the pipeline is broken when
+it is merely waiting.
+
+To force a check now, run a one-off container against the same socket. It scans
+using the same labels and exits:
+
+```bash
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock   nickfedor/watchtower:1.22.1 --label-enable --run-once
+```
+
+Add `--monitor-only` to see what it *would* update without touching anything —
+the safest way to confirm scope, and it should report `scanned=1`.
 
 #### If something breaks, in stage order
 
