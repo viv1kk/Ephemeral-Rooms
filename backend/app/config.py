@@ -52,6 +52,19 @@ class Settings(BaseSettings):
     MAX_UPLOADS_PER_USER: int = 5
 
     # --- Storage (spec section 17) ----------------------------------------
+
+    # A ceiling on everything this application stores, across every room.
+    # 0 leaves the volume itself as the only limit, which is the right default
+    # on a dedicated server. Set it when the data root lives on a volume shared
+    # with other things - a container on a developer machine, most obviously -
+    # where "free space" is not the same question as "space this app may use".
+    #
+    # Enforced by capping the figure the reservation ledger reads, so admission,
+    # the UI number and the mid-transfer re-check all honour it. See
+    # BudgetedDiskSpace in app/storage/fs.py for why it is done there and not
+    # with a filesystem quota.
+    MAX_TOTAL_STORAGE_BYTES: int = 0
+
     DISK_HEADROOM_BYTES: int = 2 * 1024**3
     DISK_RECHECK_INTERVAL_BYTES: int = 64 * 1024**2
     UPLOAD_CHUNK_BYTES: int = 8 * 1024**2
