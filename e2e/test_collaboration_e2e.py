@@ -300,7 +300,15 @@ def test_your_own_caret_is_flagged_once_someone_else_is_editing(open_room) -> No
     a.page.wait_for_timeout(900)
 
     a.page.wait_for_selector(".cm-yLocalCaret", timeout=10000)
-    assert a.page.inner_text(".cm-yLocalCaret .cm-ySelectionInfo") == "You"
+    # The label is a ::after pseudo-element, not a child node, so it has to be
+    # read from the computed style. That is deliberate: as a real element it was
+    # an inline widget, and an inline widget is a stop for horizontal cursor
+    # motion - which cost roughly two of every three ArrowRight presses. See
+    # editor/localCursor.ts and test_cursor_stability_e2e.py.
+    label = a.page.evaluate(
+        "() => getComputedStyle(document.querySelector('.cm-yLocalCaret'), '::after').content"
+    )
+    assert "You" in label, f"the flag should read You, got {label!r}"
 
 
 def test_a_caret_disappears_when_that_user_leaves_the_text_area(open_room) -> None:

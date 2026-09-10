@@ -165,3 +165,50 @@ def test_two_people_moving_cursors_keep_the_editor_quiet(open_room) -> None:
     a.page.wait_for_timeout(400)
 
     assert _editor_errors(log_after) == [], "the editor crashed after the other user left"
+
+
+def _trace_presses(page, key, presses=9):
+    """How far the cursor actually moved on each press.
+
+    The unit of interest is document offset, not elapsed time. The fault this
+    guards against did not make anything slow - it made key presses do nothing,
+    which reads as lag and is invisible to a timing measurement."""
+    head = "() => document.querySelector('.cm-content').cmView.view.state.selection.main.head"
+    prev = page.evaluate(head)
+    moves = []
+    for _ in range(presses):
+        page.keyboard.press(key)
+        page.wait_for_timeout(100)
+        now = page.evaluate(head)
+        moves.append(now - prev)
+        prev = now
+    return moves
+
+
+def test_the_cursor_moves_on_every_press_with_others_present(open_room) -> None:
+    """Regression: the "You" flag used to be an inline widget decoration, which
+    is a real stop for horizontal cursor motion. With it sitting at the caret
+    and rebuilt at each new position, ArrowRight advanced the document offset on
+    only one press in three - reported as massive lag rightward, slight lag
+    leftward, none vertically, starting the moment a second person put a cursor
+    in the document. It is drawn into a layer now; see editor/localCursor.ts."""
+    a = open_room("9205")
+    b = open_room("9205")
+
+    a.type("the quick brown fox jumps over the lazy dog")
+    a.wait_for_text("the quick brown fox jumps over the lazy dog")
+    b.wait_for_text("the quick brown fox jumps over the lazy dog")
+
+    # The flag only draws while someone else has a cursor, which is exactly the
+    # condition that used to break motion.
+    b.click_editor()
+    a.click_editor()
+    a.page.keyboard.press("ControlOrMeta+Home")
+    a.page.wait_for_timeout(400)
+    assert a.page.locator(".cm-yLocalCaret").count() == 1, "the You flag should be drawn"
+
+    right = _trace_presses(a.page, "ArrowRight")
+    assert all(d == 1 for d in right), f"ArrowRight did not advance every press: {right}"
+
+    left = _trace_presses(a.page, "ArrowLeft")
+    assert all(d == -1 for d in left), f"ArrowLeft did not advance every press: {left}"
