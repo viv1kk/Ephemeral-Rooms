@@ -594,17 +594,29 @@ rsync -av dist/ user@host:/opt/ephemeral-rooms/frontend/dist/
 
 ## Docker
 
-Two containers, the same shape as the systemd deployment: Uvicorn holding all
-the room state, and Nginx serving the built frontend and reverse-proxying
-`/api` and `/ws` to it. Node lives in a build stage and is not in the shipped
-image, so the runtime has no Node on it — exactly as the EC2 instance does not.
+Three containers. Two of them are the systemd deployment packaged — Uvicorn
+holding all the room state, and Nginx serving the built frontend and
+reverse-proxying `/api` and `/ws` to it. The third is `cloudflared`, which
+carries public traffic in from the Cloudflare edge and does nothing else. Node
+lives in a build stage and is not in any shipped image, so the runtime has no
+Node on it — exactly as the EC2 instance does not.
 
 ```bash
-docker compose up -d --build   # -> http://127.0.0.1:8080
+cp .env.example .env           # fill in the tunnel UUID and credentials path
+docker compose up -d --build   # local: http://127.0.0.1:8080
 ```
 
 ```
-                    │  http://127.0.0.1:8080
+                internet
+                    |  https
+            +-------v--------+
+            | Cloudflare edge|   TLS terminates here
+            +-------+--------+
+                    |  QUIC, outbound-initiated - no inbound port on your host
+         +----------v----------+
+         | tunnel  cloudflared |  routing only, holds no state
+         +----------+----------+
+                    |  http://web:80        (compose network)
          +----------v----------+
          | web     nginx       |  dist/, security headers, SPA fallback
          +----------+----------+
@@ -621,7 +633,8 @@ docker compose up -d --build   # -> http://127.0.0.1:8080
 | [`backend/Dockerfile`](backend/Dockerfile) | Uvicorn, one worker, non-root, Debian slim |
 | [`frontend/Dockerfile`](frontend/Dockerfile) | Node build stage → Nginx serving `dist/` |
 | [`deploy/docker/nginx.conf`](deploy/docker/nginx.conf) | [`deploy/nginx.conf`](deploy/nginx.conf) adapted to the compose network |
-| [`docker-compose.yml`](docker-compose.yml) | Wiring, volume, health gate, restart policies |
+| [`docker-compose.yml`](docker-compose.yml) | Wiring, volume, health gates, restart policies |
+| [`.env.example`](.env.example) | Template for `.env` — tunnel identity and public origin |
 | [`.dockerignore`](.dockerignore) | Shared by both builds — both use the repo root as context |
 
 The response headers come from [`deploy/security-headers.conf`](deploy/security-headers.conf),
@@ -629,10 +642,43 @@ the same file the systemd deployment installs, copied into the web image at
 build time. One source of truth, so the two deployments cannot drift apart on
 something as easy to get wrong as a CSP.
 
+### The tunnel container
+
+It is a router, not a part of the application. It dials **out** to Cloudflare
+and forwards what comes back to Nginx, so the host needs no inbound port, no
+public IP and no certificate of its own — TLS terminates at the edge. Restarting
+it drops inbound connections and nothing else; restarting `backend` is what
+loses rooms.
+
+Two deliberate choices in [`docker-compose.yml`](docker-compose.yml):
+
+- **Only the tunnel's credentials JSON is mounted**, read-only — not the whole
+  `~/.cloudflared` directory. `cert.pem` in there is an account-wide credential
+  that can create and delete tunnels, and `cloudflared tunnel run` does not need
+  it when the tunnel is named by UUID.
+- **It points at `http://web:80`, not the backend.** Everything public goes
+  through Nginx, so static assets, the SPA fallback and the security headers
+  behave publicly exactly as they do locally.
+
+Ingress is expressed as `--url http://web:80` rather than a config file,
+because this tunnel serves one hostname backed by one service. That keeps the
+hostname out of the repository, where nothing else hardcodes a domain either
+(spec section 31); the hostname lives in the Cloudflare DNS record pointing at
+the tunnel UUID. If you ever need real ingress rules — several hostnames, path
+routing, per-origin timeouts — add a `config.yml` and mount it at
+`/etc/cloudflared/config.yml`.
+
+`REDIRECT_HTTP_TO_HTTPS=true` is correct behind the tunnel. Cloudflare sets
+`X-Forwarded-Proto` to the scheme the visitor actually used and Nginx passes it
+through untouched, so the redirect only fires for a genuine plain-HTTP visitor —
+which is the case it exists for, a tunnel without **Always Use HTTPS** enabled.
+
 ### Keeping it running
 
-Both services are `restart: unless-stopped`, so they come back after a crash,
-after a Docker restart, and after a reboot.
+All three services are `restart: unless-stopped`, so they come back after a
+crash, after a Docker restart, and after a reboot. Verified by restarting the
+Docker daemon: all three returned on their own, the tunnel re-established its
+four edge connections, and the site answered — no command typed.
 
 > **One manual step, and without it none of the above happens.** Restart
 > policies only run when the Docker daemon is running, and Docker Desktop does
@@ -657,7 +703,7 @@ on the whole stack unless you name a service.
 ```bash
 docker compose up -d              # start everything, in the background
 docker compose ps                 # what is running, and whether it is healthy
-docker compose logs -f            # follow both; Ctrl-C detaches, stops nothing
+docker compose logs -f            # follow all three; Ctrl-C detaches, stops nothing
 docker compose logs -f backend    # just one service
 docker compose stop               # stop, and stay stopped across reboots
 docker compose start              # undo that
@@ -669,6 +715,7 @@ docker compose down               # stop and remove containers, keep the volume
 
 | You changed | What to run |
 | --- | --- |
+| `.env` (origin, tunnel, ports) | `docker compose up -d` |
 | `deploy/docker/nginx.conf` | `docker compose up -d --build web` |
 | Backend Python under `backend/app/` | `docker compose up -d --build backend` |
 | Frontend under `frontend/src/` | `docker compose up -d --build web` |
@@ -676,7 +723,7 @@ docker compose down               # stop and remove containers, keep the volume
 
 There is no hot reload — these are production images. Edit on the host, rebuild,
 and the affected container is replaced. Rebuilding `backend` destroys every open
-room; rebuilding `web` does not.
+room; rebuilding `web` or `tunnel` does not.
 
 **Looking inside**
 
@@ -684,9 +731,27 @@ room; rebuilding `web` does not.
 docker compose exec backend sh              # shell in the backend (as the app user)
 docker compose exec backend env | sort      # what settings it actually resolved
 docker compose exec backend du -sh /var/lib/ephemeral-rooms   # room files on disk
-curl 127.0.0.1:8080/api/storage             # free space the app will admit to
+curl 127.0.0.1:2000/ready                   # tunnel: edge connections established
 docker stats --no-stream                    # CPU and memory per container
+
+# Free space the app will admit to. The header is not optional - see below.
+curl -H "X-Forwarded-Proto: https" 127.0.0.1:8080/api/storage
 ```
+
+**Why that header.** With `REDIRECT_HTTP_TO_HTTPS=true` a plain-HTTP request to
+`/api/...` on loopback gets a `301` to `https://127.0.0.1:8080`, which nothing
+is listening on — the application is doing exactly what it was told, because
+from its point of view a proxy just reported a plain-HTTP visitor. Real traffic
+is unaffected: Cloudflare sends that header for you. Pages still load on
+loopback without it, because Nginx serves `dist/` itself and never asks the
+backend. Set `REDIRECT_HTTP_TO_HTTPS=false` in `.env` if you would rather work
+locally without the header.
+
+`readyConnections` from that `/ready` endpoint is the honest answer to "is the
+site actually up?" — four is normal, zero means the edge cannot reach you. The
+cloudflared image is distroless and has no shell, so it carries no healthcheck
+of its own and `exec` into it will not work; its logs and that endpoint are the
+whole diagnostic surface.
 
 **Starting clean**
 
@@ -699,22 +764,18 @@ nothing in that volume was going to survive.
 
 ### Configuration
 
-Compose reads `PUBLIC_ORIGIN`, `REDIRECT_HTTP_TO_HTTPS`, `LOG_LEVEL`,
-`DISK_HEADROOM_BYTES` and `HTTP_PORT` from your shell, each with a default.
-Anything else in [`backend/.env.example`](backend/.env.example) can be added
-under `environment:` for the `backend` service. Settings are validated at
-startup, so a malformed value stops the container immediately rather than at the
-first request; `docker compose logs backend` will name the offending field.
-
-```bash
-PUBLIC_ORIGIN=https://example.com docker compose up -d
-```
+Machine-specific values live in `.env` beside `docker-compose.yml` — see
+[`.env.example`](.env.example). Anything in
+[`backend/.env.example`](backend/.env.example) can also be added under
+`environment:` for the `backend` service. Settings are validated at startup, so
+a malformed value stops the container immediately rather than at the first
+request; `docker compose logs backend` will name the offending field.
 
 Room files go on a named volume rather than the container's writable layer, so
 large uploads do not grow the overlay and free-space checks see a real
 filesystem.
 
-### Four things worth knowing before you change any of it
+### Four more things worth knowing before you change any of it
 
 **Do not scale the backend.** `--scale backend=2` is not a performance knob
 here; it is two separate, invisible copies of the application. Every room,
@@ -724,14 +785,13 @@ different rooms and each see an empty one. One replica, one worker — the same
 constraint [`deploy/ephemeral-rooms.service`](deploy/ephemeral-rooms.service)
 carries, for the same reason (spec section 20.1).
 
-**`REDIRECT_HTTP_TO_HTTPS` defaults to `false` here**, where the application's
-own default is `true`. The web container terminates plain HTTP and forwards
-`X-Forwarded-Proto: http`; with the redirect on, the application would send a
-301 to an `https://` URL nothing is listening on, and the stack would appear
-completely broken. Turn it on when — and only when — a TLS terminator sits in
-front and forwards `X-Forwarded-Proto: https`. The Nginx config passes an
-upstream `X-Forwarded-Proto` through unchanged, so that works without further
-configuration.
+**`REDIRECT_HTTP_TO_HTTPS` depends on what is in front.** `.env` sets it to
+`true`, which is right behind the tunnel: Cloudflare reports the visitor's real
+scheme and Nginx passes it through, so the redirect only fires for a genuine
+plain-HTTP visitor. Running the stack with nothing in front — straight at
+`http://127.0.0.1:8080` with the tunnel stopped — set it to `false`, or the web
+container's own `X-Forwarded-Proto: http` will make the application 301 every
+request to an `https://` URL nothing is listening on.
 
 **The backend port is deliberately not published.** Only the web container can
 reach it, which is what makes `--forwarded-allow-ips '*'` safe: nothing else
@@ -744,13 +804,6 @@ as manylinux (glibc) wheels only. On musl, pip finds no wheel and falls back to
 a source build needing a full Rust toolchain. If a `pip install` in that image
 ever starts invoking a compiler, a wheel is missing for the platform — fix the
 pin rather than installing gcc and hiding it.
-
-### Behind a TLS terminator
-
-The container is not the edge. Point a host Nginx, Traefik, Caddy, or a cloud
-load balancer at `127.0.0.1:8080`, and have it forward `X-Forwarded-Proto`. The
-published port is bound to loopback for that reason; drop the `127.0.0.1:`
-prefix in `docker-compose.yml` only if you know what is in front of it.
 
 ---
 

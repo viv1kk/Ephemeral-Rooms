@@ -1,14 +1,19 @@
-# Two containers: Uvicorn holding all the room state, and Nginx serving the
-# built frontend and proxying /api and /ws to it. Same shape as the systemd
-# deployment in deploy/, packaged.
+# Three containers: Uvicorn holding all the room state, Nginx serving the built
+# frontend and proxying /api and /ws to it, and cloudflared carrying public
+# traffic in from the Cloudflare edge. The first two are the systemd deployment
+# in deploy/, packaged; the third replaces the inbound half of it entirely,
+# which is why no port needs to be open to the internet.
 #
 #     docker compose up -d --build       # then http://127.0.0.1:8080
 #
-# Both restart by themselves: `unless-stopped` brings them back when the machine
-# reboots, when Docker restarts, and when a container crashes. That depends on
-# one setting outside this file - Docker Desktop must be set to start when you
-# log in, or nothing here is running to be restarted. See the "Keeping it
-# running" part of the Docker section in README.md.
+# Machine-specific values - the tunnel UUID, its credentials file, the public
+# origin - come from `.env` beside this file. See .env.example.
+#
+# Everything restarts by itself: `unless-stopped` brings all three back when
+# the machine reboots, when Docker restarts, and when a container crashes.
+# That depends on one setting outside this file - Docker Desktop must be set to
+# start when you log in, or nothing here is running to be restarted. See the
+# "Keeping it running" part of the Docker section in README.md.
 #
 #   !!  DO NOT scale the backend. `docker compose up --scale backend=2` is not
 #   !!  a performance knob here - it is two separate, invisible copies of the
@@ -87,6 +92,72 @@ services:
         # Wait for /api/storage to answer, not merely for the container to
         # exist, so the first page load cannot race the backend's boot sweep.
         condition: service_healthy
+
+  # ------------------------------------------------------------------- tunnel
+  #
+  # Routing only. It holds no application state, terminates nothing, and knows
+  # nothing about rooms - it dials out to the Cloudflare edge and forwards what
+  # arrives to Nginx. Restarting it drops inbound connections and nothing else;
+  # restarting the backend is what loses rooms.
+  #
+  # Because the connection is outbound, the host needs no inbound port open,
+  # no public IP and no certificate: TLS is terminated at the Cloudflare edge.
+  # That is also why `web` publishes only to 127.0.0.1 - the tunnel reaches it
+  # over the compose network, not through the host's port.
+  tunnel:
+    # Pinned, like everything else here. cloudflared self-updates by default;
+    # the image's entrypoint already passes --no-autoupdate, so the version you
+    # get is the version you asked for. Bump it deliberately - Cloudflare does
+    # eventually stop accepting very old clients.
+    image: cloudflare/cloudflared:2026.9.0
+    restart: unless-stopped
+
+    depends_on:
+      web:
+        # Nothing should be publicly reachable before Nginx can answer, or the
+        # first visitor after a reboot gets a 502 from the edge.
+        condition: service_healthy
+
+    # `--url` instead of an ingress config file, deliberately. This tunnel
+    # serves one hostname backed by one service, which is exactly what --url
+    # expresses - and it keeps the hostname out of the repository, where
+    # nothing else hardcodes a domain either (spec section 31). The hostname
+    # lives in the Cloudflare DNS record that points at this tunnel's UUID.
+    #
+    # Add deploy/docker/cloudflared/config.yml and mount it at
+    # /etc/cloudflared/config.yml if you ever need real ingress rules - several
+    # hostnames, path routing, per-origin timeouts.
+    #
+    # http://web:80, not the backend: everything public goes through Nginx, so
+    # static assets, the SPA fallback and the security headers all behave the
+    # same way they do locally.
+    command: >-
+      tunnel
+      --metrics 0.0.0.0:2000
+      --url http://web:80
+      run
+      ${CF_TUNNEL_ID:?set CF_TUNNEL_ID in .env - see .env.example}
+
+    volumes:
+      # Just the one credentials file, read-only. Not the whole ~/.cloudflared
+      # directory: cert.pem in there is an account-wide credential that can
+      # create and delete tunnels, and `tunnel run` does not need it when the
+      # tunnel is identified by UUID.
+      - ${CF_CREDENTIALS_FILE:?set CF_CREDENTIALS_FILE in .env - see .env.example}:/etc/cloudflared/creds.json:ro
+
+    environment:
+      # Passed by environment rather than as a flag because --cred-file is a
+      # subcommand option and would have to sit after `run`, which is easy to
+      # get wrong when editing the command above.
+      TUNNEL_CRED_FILE: /etc/cloudflared/creds.json
+
+    ports:
+      # Readiness and metrics, on loopback only. `curl 127.0.0.1:2000/ready`
+      # reports how many edge connections are established - the one honest
+      # answer to "is the site actually up?". The image is distroless with no
+      # shell, so it carries no HEALTHCHECK of its own; this is the substitute.
+      - "127.0.0.1:${TUNNEL_METRICS_PORT:-2000}:2000"
+
 
 volumes:
   room-data:
