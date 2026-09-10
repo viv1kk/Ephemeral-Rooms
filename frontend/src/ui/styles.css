@@ -317,11 +317,55 @@ input, select {
   background: rgba(120, 150, 200, 0.3);
 }
 
-/* Your own caret flag. Same shape as the remote ones, deliberately quieter:
-   it is a landmark for finding yourself, not a notification. */
-.cm-editor .cm-yLocalCaret > .cm-ySelectionInfo {
-  opacity: 0.8;
+/* Your own caret flag, drawn into a LAYER rather than as an inline widget -
+   see editor/localCursor.ts for why that distinction is the whole bug fix.
+   The layer sits over the text and takes no part in cursor motion, so the
+   marker and its two pseudo-elements cannot slow arrow keys down.
+
+   Same shape as the remote flags, deliberately quieter: it is a landmark for
+   finding yourself, not a notification. */
+.cm-editor .cm-yLocalCaretLayer {
+  /* Overridden per-user from localCursor.ts; this is only a fallback. */
+  --cm-local-caret-color: #7aa2f7;
+}
+
+.cm-editor .cm-yLocalCaret {
+  position: absolute;
+  border-left: 2px solid var(--cm-local-caret-color);
+  /* The marker itself is the caret line; the flag hangs off it. */
+  pointer-events: none;
+}
+
+/* The dot, matching .cm-ySelectionCaretDot on the remote carets. */
+.cm-editor .cm-yLocalCaret::before {
+  content: "";
+  position: absolute;
+  top: -0.2em;
+  left: -0.3em;
+  width: 0.4em;
+  height: 0.4em;
+  border-radius: 50%;
+  background-color: var(--cm-local-caret-color);
+}
+
+/* The label. A pseudo-element rather than a child node, so there is nothing
+   for CodeMirror to rebuild as the caret moves. */
+.cm-editor .cm-yLocalCaret::after {
+  content: "You";
+  position: absolute;
+  top: -1.05em;
+  left: -1px;
+  padding: 0 5px;
+  border-radius: 3px 3px 3px 0;
+  background-color: var(--cm-local-caret-color);
+  color: #0f1115;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
   font-style: italic;
+  line-height: normal;
+  white-space: nowrap;
+  opacity: 0.8;
 }
 
 /* The label sits at -1.05em above its caret, so a selection on the first line
