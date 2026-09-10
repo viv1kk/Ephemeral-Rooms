@@ -26,9 +26,16 @@ COPY frontend/tsconfig.json frontend/vite.config.ts frontend/index.html ./
 COPY frontend/src ./src
 
 # `npm run build` is `tsc -b && vite build`, so a type error fails the image
-# build rather than shipping. Nothing here reads an environment variable: the
-# client is entirely origin-relative, so one bundle works behind any hostname
-# and there is no build argument to thread through.
+# build rather than shipping. The client stays entirely origin-relative - one
+# bundle works behind any hostname - so BUILD_ID below is the only build
+# argument, and it is a label, not configuration: nothing behaves differently
+# because of it.
+# The commit being built, stamped into the bundle and shown in the footer.
+# Declared after `npm ci` so a new build id does not invalidate the dependency
+# layer - only the build below re-runs.
+ARG BUILD_ID=dev
+ENV VITE_BUILD_ID=${BUILD_ID}
+
 RUN npm run build
 
 # --------------------------------------------------------------- serve stage

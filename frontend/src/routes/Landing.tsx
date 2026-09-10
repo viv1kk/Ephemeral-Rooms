@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 export function Landing(): JSX.Element {
@@ -6,6 +6,33 @@ export function Landing(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [code, setCode] = useState('');
+
+  // The backend's build, fetched once. `web` updates itself when a new image
+  // is published; this service is promoted by hand, because restarting it
+  // destroys every live room. So the two drifting apart is normal rather than
+  // exceptional, and worth being able to see rather than infer.
+  const [apiBuild, setApiBuild] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/version')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body: { build?: string } | null) => {
+        if (!cancelled && body?.build) setApiBuild(body.build);
+      })
+      // A version stamp is not worth an error state on the landing page. If
+      // the request fails the footer simply shows the web build alone.
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Compare in full, show the first seven. CI stamps the whole commit sha, so
+  // /api/version stays precise enough to name the exact :sha- image tag, while
+  // the footer stays readable.
+  const short = (b: string): string => (b.length > 12 ? b.slice(0, 7) : b);
+  const drifted = apiBuild !== null && apiBuild !== __BUILD_ID__;
 
   const create = async () => {
     setBusy(true);
@@ -64,6 +91,19 @@ export function Landing(): JSX.Element {
 
       <footer className="landing-footer">
         Rooms are temporary and may be lost if the server restarts.
+        <span className="landing-build" data-testid="build-stamp">
+          web <code>{short(__BUILD_ID__)}</code>
+          {apiBuild !== null && (
+            <>
+              {' · '}api <code>{short(apiBuild)}</code>
+              {drifted && (
+                <span className="landing-build-drift" title="The frontend and backend are from different builds. The backend does not update itself; promote it deliberately.">
+                  {' '}⚠
+                </span>
+              )}
+            </>
+          )}
+        </span>
       </footer>
     </main>
   );

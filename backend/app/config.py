@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     # --- Deployment -------------------------------------------------------
     # No domain is ever hardcoded in the source (spec section 31).
     PUBLIC_ORIGIN: str = "http://127.0.0.1:5173"
+
+    # The commit this image was built from, stamped in by CI as a build
+    # argument and surfaced at /api/version. "dev" whenever that did not happen
+    # - a local build, or a container run straight from source - which is the
+    # honest answer rather than a version number that means nothing.
+    BUILD_ID: str = "dev"
     DATA_ROOT: Path = Path("./.data")
     LOG_LEVEL: str = "INFO"
 

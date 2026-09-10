@@ -48,6 +48,12 @@ RUN useradd --system --uid 10001 --create-home --shell /usr/sbin/nologin ephemer
 ENV DATA_ROOT=/var/lib/ephemeral-rooms
 RUN install -d -o ephemeral -g ephemeral -m 0700 "$DATA_ROOT"
 
+# The commit being built, stamped in by CI and served at /api/version. Declared
+# here, late, so changing it does not invalidate the dependency layers above -
+# a new build id must not mean re-running pip install.
+ARG BUILD_ID=dev
+ENV BUILD_ID=${BUILD_ID}
+
 COPY --chown=root:root backend/app ./app
 COPY --chown=root:root --chmod=0755 backend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 

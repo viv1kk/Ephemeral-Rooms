@@ -368,6 +368,12 @@ jobs:
           push: false
           load: true
           tags: ${{ steps.name.outputs.image }}:sha-${{ github.sha }}
+          # Stamped into the image and shown in the landing page footer, and
+          # served by the backend at /api/version. The full sha, so the value
+          # on screen names the exact :sha- tag to roll back to; the UI
+          # shortens it for display.
+          build-args: |
+            BUILD_ID=${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
