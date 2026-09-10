@@ -38,7 +38,13 @@ from playwright.sync_api import Page, sync_playwright
 # modules differently:
 #
 #     ... cursor_investigation.py http://127.0.0.1:8001
+#
+# A second argument picks the engine - chromium (default), firefox or webkit -
+# for when a fault might plausibly be engine-specific:
+#
+#     ... cursor_investigation.py http://127.0.0.1:5173 firefox
 ORIGIN = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:5173"
+ENGINE = sys.argv[2] if len(sys.argv) > 2 else "chromium"
 HEAD = "() => document.querySelector('.cm-content').cmView.view.state.selection.main.head"
 SEL = """() => {
     const s = document.querySelector('.cm-content').cmView.view.state.selection.main;
@@ -63,7 +69,11 @@ class Client:
             lambda m: self.errors.append(f"{m.type}: {m.text}") if m.type == "error" else None,
         )
         self.page.on("pageerror", lambda e: self.errors.append(f"pageerror: {e}"))
-        self.page.goto(f"{ORIGIN}/room/{room}")
+        # domcontentloaded rather than load: the page opens a WebSocket and keeps
+        # it open, and Firefox counts that against "load" for longer than
+        # Chromium does. What matters is that the room connects, which the two
+        # waits below assert directly.
+        self.page.goto(f"{ORIGIN}/room/{room}", wait_until="domcontentloaded", timeout=60000)
         self.page.wait_for_selector(".status.connected", timeout=30000)
         self.page.wait_for_selector(".cm-content", timeout=30000)
 
@@ -113,9 +123,40 @@ def check_moves(name: str, moves: list[int], expected: int) -> None:
     )
 
 
+# The browser's OWN message when a WebSocket cannot be opened - which happens
+# legitimately whenever a peer's tab is closing, or the dev server's proxy is
+# between states. It is not the application reporting anything, and Firefox
+# surfaces it where Chromium stays quiet.
+#
+# Narrow on purpose. The bug this sweep exists for announced itself as a
+# TypeError, and a filter loose enough to swallow that would make the whole
+# file worthless - so this matches the connection message and nothing else,
+# and what it skips is still counted and printed rather than hidden.
+_NETWORK_NOISE = (
+    "can't establish a connection",
+    "can’t establish a connection",
+    "WebSocket connection to",
+    "Firefox can",
+    # Reported when a socket is torn down because its page is closing or
+    # navigating, which every scenario does deliberately at the end.
+    "was interrupted while the page was loading",
+)
+
+
+def _is_network_noise(text: str) -> bool:
+    return any(p in text for p in _NETWORK_NOISE)
+
+
 def check_quiet(name: str, *clients: Client) -> None:
-    errs = [f"[{c.label}] {e}" for c in clients for e in c.fresh_errors()]
-    record(name, not errs, "" if not errs else f"{len(errs)} console errors, first: {errs[0][:160]}")
+    raw = [f"[{c.label}] {e}" for c in clients for e in c.fresh_errors()]
+    app = [e for e in raw if not _is_network_noise(e)]
+    noise = len(raw) - len(app)
+    detail = ""
+    if app:
+        detail = f"{len(app)} application errors, first: {app[0][:160]}"
+    elif noise:
+        detail = f"clean ({noise} browser socket message(s) ignored)"
+    record(name, not app, detail)
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +492,8 @@ def scenario_rapid_repeat(ctx) -> None:
 
 def main() -> int:
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=False)
+        print(f"{ENGINE} against {ORIGIN}")
+        browser = getattr(pw, ENGINE).launch(headless=False)
         try:
             for scenario in (
                 scenario_single_user,
@@ -464,7 +506,14 @@ def main() -> int:
                 scenario_multiple_documents,
                 scenario_rapid_repeat,
             ):
-                scenario(browser.new_context())
+                # A context per scenario, closed before the next one. Leaving
+                # them open accumulates live WebSockets and, in Firefox, starts
+                # timing out page loads several scenarios later.
+                ctx = browser.new_context()
+                try:
+                    scenario(ctx)
+                finally:
+                    ctx.close()
         finally:
             browser.close()
 
