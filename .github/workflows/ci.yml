@@ -383,10 +383,22 @@ jobs:
           IMAGE: ${{ steps.name.outputs.image }}:sha-${{ github.sha }}
         run: |
           set -euo pipefail
-          docker run -d --name smoke \
-            --cap-add SYS_ADMIN --cap-add MKNOD \
-            --device /dev/loop-control \
-            --device-cgroup-rule 'b 7:* rmw' \
+          # --privileged, where docker-compose.yml grants only SYS_ADMIN, MKNOD
+          # and the loop devices. Not laziness - a runner-specific necessity.
+          #
+          # The entrypoint mknod's /dev/loop0-15 into the container's private
+          # /dev and lets `mount -o loop` choose one. Inside a container every
+          # one of those nodes looks free, but on a GitHub runner the low-
+          # numbered loop devices are already in use by the host, so mount
+          # picks a busy one and fails with "cannot mount /dev/loop0
+          # read-only". A privileged container gets the host's real /dev, so
+          # losetup sees true state and picks a genuinely free device. The
+          # narrow set works on an ordinary machine - it is what production
+          # runs, and what this image was verified against by hand.
+          #
+          # The trade-off is honest: this proves the image WORKS, not that the
+          # narrower production capability set is sufficient.
+          docker run -d --name smoke --privileged \
             -e PUBLIC_ORIGIN=http://127.0.0.1:8000 \
             -p 8000:8000 "$IMAGE"
 
@@ -447,18 +459,74 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Two tags on the one image that was just tested. :sha- is immutable and
-      # is the rollback ledger; :latest is the moving tag Watchtower follows.
-      # Pushing :latest LAST means a puller can never resolve :latest to a
-      # digest whose layers are still uploading.
-      - name: Push
+      # The IMMUTABLE tag only. :latest - the tag Watchtower actually follows -
+      # is moved by the `promote` job below, and only once BOTH images pass.
+      #
+      # This split is not theoretical. On the first real run the web image
+      # published and the backend then failed its smoke test, which left
+      # :latest pointing at a new frontend with no matching backend behind it.
+      # `fail-fast` does not prevent that - it cancels siblings that are still
+      # running, and web had already finished. A :sha- tag left behind by a
+      # half-failed run is harmless, because nothing deploys from it.
+      - name: Push the immutable tag
         env:
           IMAGE: ${{ steps.name.outputs.image }}
         run: |
           set -euo pipefail
-          docker tag "$IMAGE:sha-$GITHUB_SHA" "$IMAGE:latest"
           docker push "$IMAGE:sha-$GITHUB_SHA"
-          docker push "$IMAGE:latest"
-          echo "### Published \`$IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- \`sha-$GITHUB_SHA\` (immutable, use this to roll back)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- \`latest\` (Watchtower follows this)" >> "$GITHUB_STEP_SUMMARY"
+          echo "pushed $IMAGE:sha-$GITHUB_SHA"
+
+  promote:
+    name: Promote to :latest
+    # Both matrix legs, so this cannot run while either image is missing.
+    needs: [images]
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push' &&
+      vars.PUBLISH_IMAGES == 'true'
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+
+    # The moment of deployment: moving :latest is what a polling Watchtower
+    # acts on. Naming the environment means a required reviewer, if you add
+    # one, gates the actual release rather than the build.
+    environment:
+      name: production
+      url: https://${{ vars.DEPLOY_DOMAIN }}
+
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # `imagetools create` re-points the tag inside the registry from a
+      # manifest already there - no rebuild, no pull, no re-upload. The same
+      # mechanism the rollback workflow uses, so the promote path and the
+      # recover path are one piece of machinery with one failure mode.
+      - name: Move :latest to this commit
+        env:
+          NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          set -euo pipefail
+          ns=$(printf '%s' "$NAMESPACE" | tr '[:upper:]' '[:lower:]')
+          for svc in backend web; do
+            image="${ns}/ephemeral-rooms-${svc}"
+            docker buildx imagetools create -t "$image:latest" "$image:sha-$GITHUB_SHA"
+            echo "  $image:latest -> sha-$GITHUB_SHA"
+          done
+          {
+            echo "### Released \`sha-$GITHUB_SHA\`"
+            echo "- \`${ns}/ephemeral-rooms-backend:latest\`"
+            echo "- \`${ns}/ephemeral-rooms-web:latest\`"
+            echo ""
+            echo "Watchtower will recreate \`web\` on its next poll. The backend tag moved"
+            echo "but nothing restarts by itself - it is not watched, because recreating it"
+            echo "destroys every live room."
+          } >> "$GITHUB_STEP_SUMMARY"
