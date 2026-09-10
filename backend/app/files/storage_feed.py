@@ -1,9 +1,16 @@
-"""Periodic available-storage push (spec section 17).
+"""Periodic available-capacity push (spec section 17).
 
-The figure shown in the room's status bar is `availableForNewUpload`: free
-space minus outstanding reservations minus headroom. It is refreshed on a timer
-and pushed over the WebSocket so it reflects other people's uploads, not just
-this client's.
+Two figures, because a room holds two kinds of thing and they are limited by
+different resources:
+
+  * `available` - free disk minus outstanding reservations minus headroom,
+    which is what a file may still grow into.
+  * `memoryAvailable` - free memory minus headroom, which is what the text in
+    every open document may still grow into. -1 when it could not be measured.
+
+Neither is a quota handed out in advance; both are simply what is left. They
+are refreshed on a timer and pushed over the WebSocket so each one reflects
+what everyone else is doing, not just this client.
 
 The browser figure is advisory only. The server enforces independently at
 reservation time and never trusts a client-declared size beyond using it as the
@@ -17,6 +24,7 @@ import logging
 
 from app.files.reservations import ReservationLedger
 from app.rooms.manager import RoomManager
+from app.storage.memory import MemoryGuard
 from app.ws import events
 
 log = logging.getLogger(__name__)
@@ -28,10 +36,12 @@ class StorageBroadcaster:
         *,
         manager: RoomManager,
         ledger: ReservationLedger,
+        memory: MemoryGuard,
         interval_ms: int,
     ) -> None:
         self._manager = manager
         self._ledger = ledger
+        self._memory = memory
         self._interval_ms = interval_ms
         self._task: asyncio.Task[None] | None = None
 
@@ -61,14 +71,15 @@ class StorageBroadcaster:
             pass
 
     async def broadcast_once(self) -> int:
-        """Push the current figure to every connected room. Returns the value
-        sent, which is what the tests assert on."""
+        """Push the current figures to every connected room. Returns the disk
+        value sent, which is what the tests assert on."""
         rooms = [r for r in self._manager.rooms.values() if r.connected_users]
         if not rooms:
             return 0
-        # One disk probe for all rooms; the figure is process-wide.
+        # One probe of each for all rooms; both figures are process-wide.
         available = await self._ledger.available_for_new_upload()
-        payload = events.storage(available)
+        memory_available = await self._memory.available_for_new_text()
+        payload = events.storage(available, memory_available)
         for room in rooms:
             await room.broadcast_json(payload)
         return available

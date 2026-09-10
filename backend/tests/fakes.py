@@ -95,6 +95,28 @@ class FakeDiskSpace:
         return self.free_bytes
 
 
+class FakeMemory:
+    """Settable free memory, the counterpart of FakeDiskSpace.
+
+    Memory pressure is not something a test can produce honestly - filling the
+    runner's RAM to see what the guard does would be a test that occasionally
+    kills the test runner - so the reading is injected, exactly as free disk
+    space is (spec section 37.1).
+
+    Defaults high enough that a test which does not care about memory never
+    trips the guard. `-1` is the "could not be measured" reading; see
+    app/storage/memory.py.
+    """
+
+    def __init__(self, available_bytes: int = 8 * 1024**3) -> None:
+        self.available_bytes = available_bytes
+        self.calls = 0
+
+    async def bytes_available(self) -> int:
+        self.calls += 1
+        return self.available_bytes
+
+
 class RecordingConnection:
     """A `PeerConnection` that records frames instead of sending them.
 

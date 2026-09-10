@@ -175,13 +175,18 @@ def test_a_unicode_filename_survives_upload_and_download(open_room) -> None:
     assert "filename*=UTF-8''" in disposition
 
 
-def test_the_status_bar_reports_connection_people_and_storage(open_room) -> None:
+def test_the_status_bar_reports_connection_people_and_headroom(open_room) -> None:
+    """Both headroom figures, because they are now the only answer to "how much
+    more can this room take" - nothing caps a document or a file any more."""
     room = open_room("6008")
     status = room.page.inner_text(".room-status")
 
     assert "Connected" in status
     assert "1 person" in status
-    assert "Available storage:" in status
+    assert "Storage left:" in status
+    # Memory is omitted rather than shown as zero on a platform that exposes no
+    # reading, so this asserts only that it is not shown as a wrong number.
+    assert "Memory left: 0 B" not in status
 
 
 def test_upload_progress_disappears_when_the_upload_finishes(open_room) -> None:
@@ -398,3 +403,58 @@ def test_both_panes_are_visible_side_by_side_on_a_desktop(open_room) -> None:
     assert sidebar is not None and main is not None
     # Side by side, not stacked.
     assert main["x"] >= sidebar["x"] + sidebar["width"] - 1
+
+
+def test_choosing_more_files_than_the_concurrency_window_uploads_all_of_them(
+    open_room,
+) -> None:
+    """MAX_UPLOADS_PER_USER bounds concurrent transfers, not how many files you
+    may upload. The client used to slice the selection down to the window and
+    silently drop the rest, so choosing 8 files quietly produced 5 - with
+    nothing anywhere to say the other 3 were never coming."""
+    a = open_room("6011")
+    count = 8  # MAX_UPLOADS_PER_USER is 5
+
+    a.page.set_input_files(
+        "[data-testid=file-input]",
+        files=[
+            {
+                "name": f"queued-{i}.txt",
+                "mimeType": "text/plain",
+                "buffer": f"contents of file {i}".encode(),
+            }
+            for i in range(count)
+        ],
+    )
+
+    for i in range(count):
+        a.page.wait_for_selector(
+            f"[data-testid=file-list] >> text=queued-{i}.txt", timeout=30000
+        )
+
+
+def test_a_paste_far_past_the_old_document_cap_survives(open_room) -> None:
+    """The old MAX_DOC_BYTES was 5 MiB and the old frame cap was 1 MiB, so this
+    text is past both - and it goes as a single Yjs update over a real socket,
+    which is the part no in-process test can prove."""
+    a = open_room("6012")
+    b = open_room("6012")
+    size = 2 * 1024 * 1024
+
+    a.page.click(".cm-content")
+    a.page.evaluate(
+        """(size) => {
+            const view = document.querySelector('.cm-content').cmView.view;
+            view.dispatch({ changes: { from: 0, insert: 'q'.repeat(size) } });
+        }""",
+        size,
+    )
+
+    # It reaches the other participant through the server's replica, which is
+    # the only proof that the server accepted and relayed the whole thing.
+    b.page.wait_for_function(
+        "(size) => document.querySelector('.cm-content').cmView.view.state.doc.length >= size",
+        arg=size,
+        timeout=60000,
+    )
+    assert "too large" not in b.page.inner_text("body").lower()

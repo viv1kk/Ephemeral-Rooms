@@ -89,11 +89,23 @@ services:
       # discards the image, then bring the stack back up.
       ROOM_DISK_SIZE: ${ROOM_DISK_SIZE:-10G}
 
-      # One room cannot swallow the whole budget. Nothing above enforces a
-      # per-room share - the global free-space check is first-come-first-served -
-      # so without this a single room could fill the disk and every other room
-      # would be refused its next upload. 0 restores unlimited.
-      MAX_ROOM_TOTAL_BYTES: ${MAX_ROOM_TOTAL_BYTES:-2147483648}
+      # Off: a room may use whatever the disk has left. There is no per-room
+      # share and the global free-space check is first-come-first-served, so
+      # one busy room can take most of the volume - that is the intended trade,
+      # since a room that has to refuse a file it has space for is the worse
+      # outcome. Set a byte count here if you would rather cap each room.
+      MAX_ROOM_TOTAL_BYTES: ${MAX_ROOM_TOTAL_BYTES:-0}
+
+      # What memory is to documents, DISK_HEADROOM_BYTES is to files. Document
+      # text never reaches the disk - it lives in the backend process - so this
+      # is what keeps a room full of text from taking the memory the process
+      # needs to keep serving. Editing is never blocked; the room is told.
+      MEMORY_HEADROOM_BYTES: ${MEMORY_HEADROOM_BYTES:-536870912}
+
+      # The largest single WebSocket frame Uvicorn will assemble, applied by
+      # the entrypoint. One paste is one frame, so this - not any application
+      # setting - is what bounds a single paste into the editor.
+      WS_MAX_FRAME_BYTES: ${WS_MAX_FRAME_BYTES:-268435456}
 
       # Every other knob in backend/.env.example works here too - add it as a
       # line above. Values are validated at startup, so a malformed one fails

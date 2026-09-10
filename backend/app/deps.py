@@ -24,7 +24,8 @@ from app.storage.fs import (
     StatvfsDiskSpace,
     SystemClock,
 )
-from app.storage.protocols import Clock, DiskSpaceProvider, FileStore
+from app.storage.memory import MemoryGuard, SystemMemory
+from app.storage.protocols import Clock, DiskSpaceProvider, FileStore, MemoryProvider
 
 
 @dataclass
@@ -32,6 +33,7 @@ class Services:
     settings: Settings
     clock: Clock
     disk: DiskSpaceProvider
+    memory: MemoryGuard
     file_store: FileStore
     ledger: ReservationLedger
     manager: RoomManager
@@ -45,6 +47,7 @@ def build_services(
     *,
     clock: Clock | None = None,
     disk: DiskSpaceProvider | None = None,
+    memory: MemoryProvider | None = None,
     file_store: FileStore | None = None,
 ) -> Services:
     clock = clock or SystemClock()
@@ -62,6 +65,13 @@ def build_services(
     file_store = file_store or LocalFileStore(settings.DATA_ROOT)
 
     ledger = ReservationLedger(disk=disk, headroom_bytes=settings.DISK_HEADROOM_BYTES)
+    # Text is bounded by memory the way files are bounded by disk, so the two
+    # guards are built side by side and read the same way.
+    memory_guard = MemoryGuard(
+        memory=memory or SystemMemory(),
+        headroom_bytes=settings.MEMORY_HEADROOM_BYTES,
+        poll_interval_ms=settings.MEMORY_POLL_INTERVAL_MS,
+    )
     manager = RoomManager(
         clock=clock,
         file_store=file_store,
@@ -86,12 +96,14 @@ def build_services(
     storage_feed = StorageBroadcaster(
         manager=manager,
         ledger=ledger,
+        memory=memory_guard,
         interval_ms=settings.STORAGE_BROADCAST_INTERVAL_MS,
     )
     return Services(
         settings=settings,
         clock=clock,
         disk=disk,
+        memory=memory_guard,
         file_store=file_store,
         ledger=ledger,
         manager=manager,
@@ -107,7 +119,13 @@ def services_of(request_or_ws: Any) -> Services:
 
 def client_limits(settings: Settings) -> dict[str, int]:
     """The subset of the caps the browser needs, so it can refuse obviously
-    invalid input locally instead of round-tripping to be told no."""
+    invalid input locally instead of round-tripping to be told no.
+
+    A zero here means "no application limit", exactly as it does in Settings,
+    and the browser must treat it that way rather than as a cap of zero. The
+    size and count caps all ship as zero by default: what a room may hold is
+    decided by the server's remaining headroom, which arrives separately and
+    keeps arriving as it changes, not by a number fixed at join time."""
     return {
         "maxDocs": settings.MAX_DOCS_PER_ROOM,
         "maxDocBytes": settings.MAX_DOC_BYTES,

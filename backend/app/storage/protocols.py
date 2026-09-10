@@ -38,6 +38,18 @@ class DiskSpaceProvider(Protocol):
         Implementations must not block the event loop (spec section 28.1)."""
 
 
+class MemoryProvider(Protocol):
+    async def bytes_available(self) -> int:
+        """Bytes of memory this process could still allocate.
+
+        The disk counterpart of this is `DiskSpaceProvider`; the two exist for
+        the same reason. Documents never reach the filesystem, so without a
+        reading of memory there is nothing for the "is there room for more
+        text" question to consult (spec section 17, extended to memory).
+
+        Implementations must not block the event loop (spec section 28.1)."""
+
+
 class FileStore(Protocol):
     """Byte storage for room files, keyed exclusively by server-generated UUIDs.
 

@@ -23,8 +23,15 @@ EnvironmentFile=/etc/ephemeral-rooms.env
 
 # Exactly one worker. Do not add --workers N. Do not add --reload (it spawns a
 # reloader process, which is a second process holding no room state).
+#
+# --ws-max-size is load-bearing, not tuning. One paste into the editor is one
+# Yjs update is one WebSocket frame, and Uvicorn's 16 MiB default closes the
+# socket with 1009 before the application sees the frame - so leaving it off
+# silently caps how much text a person may paste, a ceiling no setting in
+# /etc/ephemeral-rooms.env can express or override.
 ExecStart=/opt/ephemeral-rooms/.venv/bin/uvicorn app.main:app \
           --host 127.0.0.1 --port 8000 --workers 1 \
+          --ws-max-size 268435456 \
           --proxy-headers --forwarded-allow-ips 127.0.0.1
 
 Restart=always

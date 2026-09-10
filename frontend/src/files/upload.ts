@@ -7,7 +7,20 @@
  * resumes from there, with exponential backoff and a bounded retry count.
  */
 
-export type UploadState = 'starting' | 'uploading' | 'completing' | 'done' | 'error' | 'cancelled';
+/**
+ * `queued` is a client-only state: the file has been accepted and will be
+ * uploaded, but this browser already has maxUploadsPerUser transfers open, so
+ * it has not been announced to the server yet. Nothing past that point knows
+ * about it - `runUpload` moves a task straight to `starting`.
+ */
+export type UploadState =
+  | 'queued'
+  | 'starting'
+  | 'uploading'
+  | 'completing'
+  | 'done'
+  | 'error'
+  | 'cancelled';
 
 export interface UploadTask {
   localId: string;

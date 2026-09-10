@@ -80,8 +80,16 @@ async def version(request: Request) -> dict[str, str]:
 
 @router.get("/storage")
 async def storage(request: Request) -> dict[str, int]:
+    """What is left, after each resource's reserved headroom.
+
+    `available` bounds files, `memoryAvailable` bounds document text; -1 for
+    the latter means the platform exposed nothing to measure. Also the
+    container health check, which is why it touches the data volume."""
     services = services_of(request)
-    return {"available": await services.ledger.available_for_new_upload()}
+    return {
+        "available": await services.ledger.available_for_new_upload(),
+        "memoryAvailable": await services.memory.available_for_new_text(),
+    }
 
 
 @router.post("/rooms/{room_code}/uploads")

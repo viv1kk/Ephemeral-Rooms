@@ -36,6 +36,15 @@ export interface RoomFile {
   uploadedAt: number;
 }
 
+/**
+ * The server's caps, as sent at join.
+ *
+ * A zero on any of these means "no application limit", not "a limit of zero" -
+ * and by default every size and count below IS zero. What a room may hold is
+ * decided by `storageAvailable` and `memoryAvailable`, which keep arriving as
+ * they change, rather than by a number fixed when the socket opened. Anything
+ * reading these must check for zero before comparing against it.
+ */
 export interface Limits {
   maxDocs: number;
   maxDocBytes: number;
@@ -61,6 +70,8 @@ export interface JoinedEvent {
   roomWasCreated: boolean;
   room: { roomCode: string; users: RoomUser[]; documents: RoomDocument[]; files: RoomFile[] };
   storageAvailable: number;
+  /** Free memory minus its headroom, bounding document text. -1 = unmeasurable. */
+  memoryAvailable: number;
   limits: Limits;
 }
 
@@ -77,7 +88,7 @@ export type ServerEvent =
   | { type: 'upload_ended'; uploadId: string; reason: string }
   | { type: 'file_deleted'; fileId: string; name: string; deletedBy: string }
   | { type: 'upload_progress'; uploadId: string; uploaderName: string; filename: string; percent: number }
-  | { type: 'storage'; available: number }
+  | { type: 'storage'; available: number; memoryAvailable: number }
   | { type: 'ping'; t: number }
   | { type: 'room_closing'; reason: string }
   | { type: 'error'; code: string; message: string; reference?: string };
