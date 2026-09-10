@@ -99,10 +99,10 @@ compose ps --format '  {{.Name}}\t{{.Image}}\t{{.Status}}' 2>/dev/null || compos
 
 # ---------------------------------------------------------------- watchtower
 #
-# Presence is not the interesting part - scope is. `scanned` must equal the
-# number of containers carrying the enable label, which is `web` alone. If that
-# number ever includes the backend, an unattended update would destroy every
-# live room.
+# Presence is not the interesting part - scope is. The enable label should be on
+# `backend` and `web`, the two images this repository publishes, and on nothing
+# else. `tunnel` carries a deliberately pinned Cloudflare version, and updating
+# the updater mid-run is a needless way to lose a deployment.
 
 head "Watchtower"
 if [ -z "$(compose ps -q watchtower 2>/dev/null || true)" ]; then
@@ -113,7 +113,7 @@ else
       "${DOCKER[@]}" inspect -f '{{index .Config.Labels "com.centurylinklabs.watchtower.enable"}}' "$c"
     done | grep -c '^true$' || true
   )
-  echo "  running; ${labelled} container(s) carry the enable label (expected: 1, web)"
+  echo "  running; ${labelled} container(s) carry the enable label (expected: 2 - backend, web)"
   compose logs --tail 3 watchtower 2>/dev/null | sed 's/^/  /' || true
   echo "${dim}  Restarting the service does NOT force a check - it resets the timer."
   echo "  To check now:  docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \\"
@@ -143,9 +143,9 @@ done
 
 if [ "$stale" -ne 0 ]; then
   head "Result"
-  echo "  Something is not current. If Watchtower is running, web catches up on its"
-  echo "  next poll. The backend never updates itself - promote it deliberately:"
-  echo "      docker compose pull backend && docker compose up -d backend"
+  echo "  Something is not current. If Watchtower is running, both services catch up"
+  echo "  on the next poll (default 15 min). To apply a published image right now:"
+  echo "      docker compose pull && docker compose up -d"
   exit 1
 fi
 

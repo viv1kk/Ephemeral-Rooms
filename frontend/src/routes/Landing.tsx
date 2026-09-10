@@ -7,10 +7,10 @@ export function Landing(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [code, setCode] = useState('');
 
-  // The backend's build, fetched once. `web` updates itself when a new image
-  // is published; this service is promoted by hand, because restarting it
-  // destroys every live room. So the two drifting apart is normal rather than
-  // exceptional, and worth being able to see rather than infer.
+  // The backend's build, fetched once. Both services now update themselves on
+  // the same poll, so the two agreeing is the steady state and a difference is
+  // worth showing: it means one image landed and the other has not yet, which
+  // is a window of minutes rather than the normal condition it used to be.
   const [apiBuild, setApiBuild] = useState<string | null>(null);
 
   useEffect(() => {
@@ -97,7 +97,7 @@ export function Landing(): JSX.Element {
             <>
               {' · '}api <code>{short(apiBuild)}</code>
               {drifted && (
-                <span className="landing-build-drift" title="The frontend and backend are from different builds. The backend does not update itself; promote it deliberately.">
+                <span className="landing-build-drift" title="The frontend and backend are from different builds. Both update themselves, so this usually clears within a poll interval.">
                   {' '}⚠
                 </span>
               )}

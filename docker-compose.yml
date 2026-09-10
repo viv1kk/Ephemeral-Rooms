@@ -25,13 +25,7 @@ services:
   backend:
     # Published by CI to Docker Hub. DOCKERHUB_NAMESPACE lives in .env, so no
     # account name is hardcoded here; BACKEND_IMAGE overrides the whole
-    # reference when you promote or roll back to a specific :sha- tag.
-    #
-    # Deliberately NOT labelled for Watchtower. Recreating this container
-    # destroys every live room, document, presence entry and uploaded file, so
-    # it is never updated unattended - you promote it, at a moment you choose:
-    #
-    #     docker compose pull backend && docker compose up -d backend
+    # reference when you pin or roll back to a specific :sha- tag.
     image: ${BACKEND_IMAGE:-${DOCKERHUB_NAMESPACE:?set DOCKERHUB_NAMESPACE in .env - see .env.example}/ephemeral-rooms-backend:latest}
     build:
       # Repository root, so both images share one .dockerignore and the web
@@ -39,6 +33,20 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     restart: unless-stopped
+
+    # Updated by Watchtower, unattended, like `web`.
+    #
+    # Recreating this container destroys every live room, document, presence
+    # entry and uploaded file, and there is no warning to the people in them.
+    # That is accepted here: the rooms are ephemeral by design and short-lived,
+    # a release is not a rare event worth choreographing around, and a backend
+    # that lags the frontend it was tested against is its own kind of bug.
+    #
+    # So a release lands on its own, at whatever moment the poll finds it. If
+    # you ever want a specific release to land at a chosen time instead, stop
+    # the poller rather than un-labelling this - see the watchtower service.
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
 
     # Deliberately no `ports:`. The backend is reachable only from the web
     # container, over the compose network, and that is what makes
@@ -145,10 +153,10 @@ services:
       dockerfile: frontend/Dockerfile
     restart: unless-stopped
 
-    # The one container Watchtower is allowed to update by itself. Recreating
-    # Nginx drops inbound connections and nothing else - no room, document or
-    # upload lives in this container - so a new frontend build can land
-    # unattended. The backend cannot; see the note on that service.
+    # Updated by Watchtower, like `backend`. Recreating Nginx drops inbound
+    # connections and nothing else, so this one has always been cheap to
+    # replace; the backend is now released the same way, for the reasons on
+    # that service.
     labels:
       com.centurylinklabs.watchtower.enable: "true"
 
@@ -232,10 +240,15 @@ services:
   # ---------------------------------------------------------------- watchtower
   #
   # The continuous-deployment half. It polls Docker Hub for a new digest behind
-  # the `web` image's tag and, when one appears, pulls it and recreates that one
-  # container. Nothing is pushed to this machine and no port is opened: the poll
-  # is outbound, the same direction as the tunnel, which is what lets the whole
-  # stack keep its "no inbound port" property.
+  # the `backend` and `web` image tags and, when one appears, pulls it and
+  # recreates that container. Nothing is pushed to this machine and no port is
+  # opened: the poll is outbound, the same direction as the tunnel, which is
+  # what lets the whole stack keep its "no inbound port" property.
+  #
+  # This is the only thing standing between a published image and a running
+  # one, in both directions: stopping it freezes the deployment, and starting
+  # it again lets whatever is on :latest land at the next poll. That is the
+  # supported way to hold a release back - not un-labelling a service.
   #
   # Behind a profile, so it is opt-in. `docker compose up -d` on a laptop should
   # not silently start something that replaces containers from a registry:
@@ -273,10 +286,12 @@ services:
 
     environment:
       # Opt-in, not opt-out. Only containers carrying
-      # com.centurylinklabs.watchtower.enable=true are considered, which today
-      # is `web` alone. `backend` is excluded because recreating it destroys
-      # every live room; `tunnel` because its version is pinned deliberately and
-      # Cloudflare occasionally ships breaking client changes.
+      # com.centurylinklabs.watchtower.enable=true are considered, which is
+      # `backend` and `web` - the two this repository publishes. `tunnel` is
+      # excluded because its version is pinned deliberately and Cloudflare
+      # occasionally ships breaking client changes, and `watchtower` itself
+      # because updating the updater mid-run is a needless way to lose a
+      # deployment.
       WATCHTOWER_LABEL_ENABLE: "true"
 
       # Remove the superseded image after a successful update. Without this the
@@ -286,7 +301,8 @@ services:
       # Seconds between registry checks. Every check is a manifest request that
       # counts against Docker Hub's pull limit, so this is a rate-limit dial as
       # much as a latency one - see the CD section of README.md before lowering
-      # it. One image at 15 minutes is ~96 checks a day.
+      # it. Two images at 15 minutes is ~192 checks a day, which is why the
+      # poll should be authenticated; see DOCKERHUB_READ_TOKEN in .env.example.
       WATCHTOWER_POLL_INTERVAL: ${WATCHTOWER_POLL_INTERVAL:-900}
 
       # Give Nginx time to finish in-flight responses instead of being killed.
