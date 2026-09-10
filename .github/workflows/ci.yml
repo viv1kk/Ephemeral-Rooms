@@ -293,3 +293,172 @@ jobs:
           done
           echo "::error::the deployed site did not answer correctly"
           exit 1
+
+  # ===========================================================================
+  # Continuous deployment, part one: publish.
+  #
+  # Builds each image, PROVES IT RUNS, and only then pushes it to Docker Hub.
+  # The four jobs above prove the source is good; they say nothing about the
+  # artifact. A missing wheel, a broken entrypoint or an Nginx config that fails
+  # to parse all produce a green test suite and an image that will not start.
+  # This job is the difference between "the code was fine" and "the thing we are
+  # about to deploy runs".
+  #
+  # Part two is Watchtower on the deployment machine, which notices the new
+  # digest behind the tag and recreates the container. There is no ssh step and
+  # no inbound port; see the CD section of README.md.
+  # ===========================================================================
+
+  images:
+    name: Publish the ${{ matrix.service }} image
+    needs: [backend, frontend, e2e, pinned-versions]
+    # Never from a branch, a pull request or the weekly schedule - and inert
+    # until PUBLISH_IMAGES is set, so all of this can be merged and sit unused.
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push' &&
+      vars.PUBLISH_IMAGES == 'true'
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Docker Hub is authenticated with its own token, not GITHUB_TOKEN, so this
+    # job needs nothing beyond reading the checkout.
+    permissions:
+      contents: read
+
+    strategy:
+      # Both images or neither. Publishing a backend whose matching web build
+      # failed leaves the tags describing a combination nobody tested.
+      fail-fast: true
+      matrix:
+        include:
+          - service: backend
+            dockerfile: backend/Dockerfile
+          - service: web
+            dockerfile: frontend/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Work out the image name
+        id: name
+        env:
+          NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NAMESPACE:-}" ]; then
+            echo "::error::DOCKERHUB_USERNAME is not set. Add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          # Docker Hub repository names must be lowercase.
+          ns=$(printf '%s' "$NAMESPACE" | tr '[:upper:]' '[:lower:]')
+          echo "image=${ns}/ephemeral-rooms-${{ matrix.service }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Built but NOT pushed. `load: true` puts it in the local daemon so the
+      # smoke test below has something to run; the push happens further down,
+      # only if that passes. This ordering is the whole safety property.
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          load: true
+          tags: ${{ steps.name.outputs.image }}:sha-${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      # The backend must mount a loop-backed ext4 image before Uvicorn starts,
+      # so it needs the same capabilities docker-compose.yml grants it. Probing
+      # /api/storage rather than / exercises settings validation, the service
+      # graph and a real disk_usage() call against that mounted filesystem - so
+      # this fails if the entrypoint could not build the room filesystem, which
+      # is exactly the class of bug a unit test cannot see.
+      - name: Smoke-test the backend image
+        if: matrix.service == 'backend'
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}:sha-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke \
+            --cap-add SYS_ADMIN --cap-add MKNOD \
+            --device /dev/loop-control \
+            --device-cgroup-rule 'b 7:* rmw' \
+            -e PUBLIC_ORIGIN=http://127.0.0.1:8000 \
+            -p 8000:8000 "$IMAGE"
+
+          ok=
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8000/api/storage; then ok=1; break; fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::the backend image did not answer /api/storage within 60s"
+            docker logs smoke 2>&1 | tail -50
+            exit 1
+          fi
+
+          # Prove it does the actual job, not merely that it boots.
+          room=$(curl -fsS -X POST http://127.0.0.1:8000/api/rooms)
+          case "$room" in
+            *roomCode*) echo "created a room: $room" ;;
+            *) echo "::error::POST /api/rooms returned: ${room:-<nothing>}"; docker logs smoke 2>&1 | tail -50; exit 1 ;;
+          esac
+          docker rm -f smoke >/dev/null
+
+      # Nginx resolves its upstream at request time through a variable, so the
+      # image starts happily with no backend behind it. That is what makes this
+      # standalone check possible: it proves the config parses, the built assets
+      # are in the image, and the SPA entry point is served.
+      - name: Smoke-test the web image
+        if: matrix.service == 'web'
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}:sha-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke -p 8080:80 "$IMAGE"
+
+          ok=
+          for _ in $(seq 1 15); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/index.html; then ok=1; break; fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::the web image did not serve /index.html within 30s"
+            docker logs smoke 2>&1 | tail -50
+            exit 1
+          fi
+
+          # The bundle must actually be in there. An empty dist/ still serves a
+          # 200 for index.html, so check it references a hashed asset.
+          if ! curl -fsS http://127.0.0.1:8080/index.html | grep -q '/assets/'; then
+            echo "::error::index.html does not reference /assets/ - the bundle is missing from the image"
+            exit 1
+          fi
+          echo "web image serves the built bundle"
+          docker rm -f smoke >/dev/null
+
+      # Only now, with a running container behind us.
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Two tags on the one image that was just tested. :sha- is immutable and
+      # is the rollback ledger; :latest is the moving tag Watchtower follows.
+      # Pushing :latest LAST means a puller can never resolve :latest to a
+      # digest whose layers are still uploading.
+      - name: Push
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker tag "$IMAGE:sha-$GITHUB_SHA" "$IMAGE:latest"
+          docker push "$IMAGE:sha-$GITHUB_SHA"
+          docker push "$IMAGE:latest"
+          echo "### Published \`$IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`sha-$GITHUB_SHA\` (immutable, use this to roll back)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`latest\` (Watchtower follows this)" >> "$GITHUB_STEP_SUMMARY"
