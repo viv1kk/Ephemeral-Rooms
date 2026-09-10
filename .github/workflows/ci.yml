@@ -21,7 +21,21 @@ on:
 # A newer push to the same branch makes the older run irrelevant.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # ...except on main, which is the only branch that publishes and deploys.
+  #
+  # A run there can be part way through a release - `sha-` tags pushed, and
+  # `promote` not yet reached - and cancelling does not roll any of that back.
+  # It abandons the registry in exactly the half-updated state the promote step
+  # exists to prevent.
+  #
+  # Not hypothetical: two PRs merged ten seconds apart cancelled the first
+  # one's run outright. It happened to be harmless that time, because the
+  # second run rebuilt the same tree. Landing between the push and the promote
+  # would not have been.
+  #
+  # Feature branches publish nothing, so cancelling those still just saves
+  # runner time.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
