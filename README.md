@@ -851,26 +851,35 @@ push to main
                           watchtower ──poll──▶ new digest?
                                         │
                                         ▼
-                                  pull + recreate  web
+                            pull + recreate  backend + web
 ```
 
 Nothing is pushed *to* the machine and no port is opened — the poll is outbound,
 the same direction as the tunnel, which is what lets the stack keep its "no
 inbound port" property. There is no SSH key anywhere in this pipeline.
 
-**Only `web` updates itself.**
+**Both published services update themselves.**
 
 | | Auto-updates | Why |
 | --- | --- | --- |
 | `web` | **yes** | Recreating Nginx drops inbound connections and nothing else |
-| `backend` | no | Recreating it destroys **every live room**, document and upload |
+| `backend` | **yes** | A release should land without a person in the loop |
 | `tunnel` | no | Its version is pinned deliberately |
+| `watchtower` | no | Updating the updater mid-run is a needless way to lose a deploy |
 
-The backend is still built, tested and published on every push — it just waits
-for you to promote it, at a moment you choose:
+**Recreating the backend destroys every live room, document and upload, with no
+warning to anyone in them.** That is accepted here rather than worked around:
+the rooms are ephemeral and short-lived by design, a release is not a rare
+event worth choreographing around, and a backend lagging the frontend it was
+tested against is its own kind of bug. A deploy is a few seconds of downtime
+and an empty slate, which is what this application is.
+
+If you do want a particular release held back, stop the poller rather than
+un-labelling the service — the label is what the status script checks:
 
 ```bash
-docker compose pull backend && docker compose up -d backend
+docker compose stop watchtower          # freeze deployments
+docker compose --profile watchtower up -d   # resume; lands at the next poll
 ```
 
 #### The tagging strategy, and why it is both
@@ -1034,8 +1043,9 @@ so rolling back is a re-tag, not a rebuild.
 
 **From GitHub, no SSH:** Actions → **Roll back** → *Run workflow* → pick the
 service, paste the commit SHA. It checks the target exists, re-points `:latest`
-at it inside the registry, and Watchtower recreates `web` on its next poll — the
-same path a deployment takes, which is the path you have actually tested.
+at it inside the registry, and Watchtower recreates the container on its next
+poll — the same path a deployment takes, which is the path you have actually
+tested.
 
 **On the machine, immediately:**
 
@@ -1043,22 +1053,25 @@ same path a deployment takes, which is the path you have actually tested.
 WEB_IMAGE=your-name/ephemeral-rooms-web:sha-<good-commit> docker compose up -d web
 ```
 
-Rolling `backend` back never happens by itself — it is not watched. Move the tag,
-then promote it deliberately, remembering that it drops every live room.
+`BACKEND_IMAGE` pins the backend the same way. Note that pinning a service to a
+`sha-` tag takes it out of the flow of releases: Watchtower follows the tag it
+was given, so a pinned container stops tracking `:latest` until you unpin it.
 
 #### Gotchas worth knowing before you rely on this
 
 **A backend deploy destroys every live room.** Not downtime — data loss, by
 design. Rooms, documents, presence and uploads all live in one process's memory
-on a volume wiped at start. This is precisely why `backend` is excluded from
-Watchtower: unattended room destruction at an unpredictable moment is a very
-different thing from a restart you chose.
+on a volume wiped at start, and a release recreates that container unattended,
+so it happens at whatever moment the poll finds a new digest. Anyone mid-session
+is disconnected with no warning and their room does not come back. That is the
+accepted trade for releases that land on their own; if a particular one needs to
+wait, stop the poller rather than un-labelling the service.
 
 **Docker Hub rate limits.** Every poll is a manifest request counting against
 your quota, and the limits have been tightened more than once — check the
 current numbers rather than trusting a figure written here. Two mitigations, and
 you want both: authenticate the poll (`DOCKERHUB_READ_TOKEN`), and keep
-`WATCHTOWER_POLL_INTERVAL` conservative. One image at 900s is ~96 checks a day.
+`WATCHTOWER_POLL_INTERVAL` conservative. Two images at 900s is ~192 checks a day.
 A limit hit here looks exactly like "deployment quietly stopped working".
 
 **`containrrr/watchtower` does not work on modern Docker.** Its last release

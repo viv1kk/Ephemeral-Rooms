@@ -69,11 +69,11 @@ async def create_room(request: Request) -> Any:
 async def version(request: Request) -> dict[str, str]:
     """Which build of the backend is answering.
 
-    The frontend shows this beside its own build id, and the two are expected
-    to drift: `web` updates itself when a new image is published, while this
-    service is promoted by hand because restarting it destroys every live room.
-    Showing both makes that drift visible instead of leaving it to be inferred
-    from behaviour.
+    The frontend shows this beside its own build id. Both services are updated
+    unattended by the same poller, so the two normally agree; a difference means
+    one image has landed and the other has not yet, which resolves itself within
+    a poll interval. Showing both makes that visible instead of leaving it to be
+    inferred from behaviour.
     """
     return {"build": services_of(request).settings.BUILD_ID}
 

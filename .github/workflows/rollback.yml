@@ -11,15 +11,16 @@ name: Roll back
 # Nothing is rebuilt, nothing is pulled to the runner, and nothing is copied to
 # the deployment machine. `imagetools create` rewrites the tag inside the
 # registry from the manifest that is already there. Watchtower notices the new
-# digest behind :latest on its next poll and recreates `web` by itself - so a
-# rollback travels the same path a deployment does, which is the path you have
-# actually tested.
+# digest behind :latest on its next poll and recreates the container by itself -
+# so a rollback travels the same path a deployment does, which is the path you
+# have actually tested.
 #
-#   !!  For `backend` this only moves the tag. Nothing restarts by itself,
-#   !!  because recreating that container destroys every live room - which is
-#   !!  exactly why it is not watched. Finish the rollback on the machine:
+#   !!  Rolling `backend` back recreates it, which destroys every live room,
+#   !!  document and upload - unattended, at whatever moment the poll lands.
+#   !!  That is the accepted trade for a rollback that completes on its own.
+#   !!  To have it land now rather than within a poll interval, on the machine:
 #   !!
-#   !!      docker compose pull backend && docker compose up -d backend
+#   !!      docker compose pull && docker compose up -d
 
 on:
   workflow_dispatch:
@@ -93,11 +94,11 @@ jobs:
             echo "### Rolled back to \`$SHA\`"
             for svc in $services; do echo "- \`${ns}/ephemeral-rooms-${svc}:latest\`"; done
             echo ""
+            echo "Watchtower recreates the affected container(s) on its next poll."
             if [ "$SERVICE" != "web" ]; then
-              echo "> The backend tag moved but nothing restarted - it is not watched, because"
-              echo "> recreating it destroys every live room. On the deployment machine:"
-              echo "> \`docker compose pull backend && docker compose up -d backend\`"
-            else
-              echo "Watchtower will recreate \`web\` on its next poll."
+              echo ""
+              echo "> Rolling the backend back destroys every live room, document and upload."
+              echo "> To land it now instead of waiting for the poll, on the machine:"
+              echo "> \`docker compose pull && docker compose up -d\`"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
