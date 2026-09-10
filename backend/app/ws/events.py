@@ -22,6 +22,7 @@ def joined(
     resumed: bool,
     room_was_created: bool,
     storage_available: int,
+    memory_available: int,
     limits: dict[str, int],
 ) -> dict[str, Any]:
     """The join acknowledgement.
@@ -43,6 +44,8 @@ def joined(
         "roomWasCreated": room_was_created,
         "room": room_snapshot,
         "storageAvailable": storage_available,
+        # See `storage()`: -1 means "not measurable here", not "none left".
+        "memoryAvailable": memory_available,
         "limits": limits,
     }
 
@@ -121,8 +124,16 @@ def upload_progress(*, upload_id: str, uploader_name: str, percent: int, filenam
     }
 
 
-def storage(available: int) -> dict[str, Any]:
-    return {"type": "storage", "available": available}
+def storage(available: int, memory_available: int) -> dict[str, Any]:
+    """What is left, disk and memory, after each one's headroom.
+
+    `memoryAvailable` is -1 when the platform gave us nothing to read; the
+    browser shows nothing rather than a wrong number in that case."""
+    return {
+        "type": "storage",
+        "available": available,
+        "memoryAvailable": memory_available,
+    }
 
 
 def ping(now_ms: int) -> dict[str, Any]:

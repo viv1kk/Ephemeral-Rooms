@@ -98,14 +98,27 @@ class UploadService:
 
         if size < 0:
             raise UploadError(400, "bad_size", "That file size is not valid.")
+
+        # Every cap below is opt-in and off by default. What decides whether a
+        # file may be uploaded is the reservation further down: free disk,
+        # minus what other uploads have already promised to use, minus the
+        # headroom the server keeps for its own operation. A file that fits
+        # that is allowed, however large it is - which is the whole point of
+        # leaving these at 0 (spec section 17).
         if self._settings.MAX_FILE_BYTES and size > self._settings.MAX_FILE_BYTES:
             raise UploadError(413, "file_too_large", "That file is larger than this server allows.")
-        if len(room.files) >= self._settings.MAX_FILES_PER_ROOM:
+        per_room = self._settings.MAX_FILES_PER_ROOM
+        if per_room and len(room.files) >= per_room:
             raise UploadError(409, "too_many_files", "This room already holds the maximum number of files.")
         if self._settings.MAX_ROOM_TOTAL_BYTES:
             total = sum(f.size for f in room.files.values()) + size
             if total > self._settings.MAX_ROOM_TOTAL_BYTES:
                 raise UploadError(413, "room_full", "This room has reached its total storage limit.")
+
+        # Not a limit on what a room may hold: this one bounds how many
+        # transfers a single browser may have open at once, and the client
+        # queues the rest rather than dropping them, so every chosen file still
+        # arrives. Concurrency, not capacity.
         mine = sum(1 for u in room.uploads.values() if u.uploader_id == uploader_id)
         if mine >= self._settings.MAX_UPLOADS_PER_USER:
             raise UploadError(429, "too_many_uploads", "You already have too many uploads in progress.")

@@ -236,7 +236,7 @@ The following update live with no manual refresh:
 
 **Message envelope.** Every client message is JSON with a `type` field, except Yjs sync and awareness frames, which are binary and prefixed with a single-byte channel tag.
 
-Validation uses a **Pydantic v2 discriminated union** on `type`, so every inbound control message is parsed into a typed model before it reaches any handler. Unknown type, missing field, wrong type, or a payload over `MAX_WS_MESSAGE_BYTES` results in the message being dropped and a structured error event returned. A `ValidationError` must never propagate to the connection handler and must never terminate the socket unless malformed input is repeated abusively.
+Validation uses a **Pydantic v2 discriminated union** on `type`, so every inbound control message is parsed into a typed model before it reaches any handler. Unknown type, missing field, wrong type, or a control payload over `MAX_WS_MESSAGE_BYTES` (which bounds control messages only, never document text) results in the message being dropped and a structured error event returned. A `ValidationError` must never propagate to the connection handler and must never terminate the socket unless malformed input is repeated abusively.
 
 Binary frames are dispatched by their channel tag before any JSON parsing is attempted, and are passed to the CRDT layer as raw bytes.
 
@@ -509,6 +509,7 @@ The failure mode is silent and confusing rather than loud: two users open the sa
 Therefore:
 
 * Run `uvicorn app.main:app --host 127.0.0.1 --port 8000` with **no** `--workers` flag, or `--workers 1` explicitly.
+* Pass `--ws-max-size` (see §21.3). One paste into the editor is one Yjs update is one WebSocket frame, so Uvicorn's 16 MiB default is a ceiling on how much text a person may paste — imposed a layer below anything the application can express, and silent: the socket is closed with 1009 before any handler runs. Every launch path must carry it — the container entrypoint, the systemd unit, and the local development command alike.
 * Do **not** deploy under `gunicorn -k uvicorn.workers.UvicornWorker -w N`. This is the most commonly recommended FastAPI production pattern and it is wrong for this application.
 * Do not add `--reload` in production; it spawns a reloader process.
 * Add a startup assertion that logs a prominent warning if more than one worker is somehow detected, and state the constraint in a comment at the top of the ASGI entry point and in the systemd unit file.
@@ -546,22 +547,36 @@ These are hygiene requirements, not access control, and are mandatory regardless
 
 ### 21.3 Resource limits (new)
 
-Unlimited uploads plus no authentication on a single instance is a trivial disk-fill denial of service. Defaults are set high enough to be invisible in normal personal use.
+**No fixed limit governs what a room may hold.** A number chosen in advance is either smaller than the server can carry - in which case it refuses work the machine had room for - or larger, in which case it protects nothing. So the size and count of a room's contents are bounded by what the server still has, and by nothing else:
+
+* **Files** by free disk minus outstanding reservations minus `DISK_HEADROOM_BYTES`, enforced atomically at reservation time (§17).
+* **Document text** by free memory minus `MEMORY_HEADROOM_BYTES`. Documents never reach the filesystem - every CRDT document lives in the backend process - so memory is what actually bounds them, and it gets the same treatment the disk already had.
+
+Each cap below is still available for an operator who needs a ceiling smaller than the machine, and `0` - the default on every one that describes room contents - means "no application limit".
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MAX_ROOMS` | `200` | Concurrent room instances. |
+| `MAX_ROOMS` | `200` | Concurrent room instances. Bounded by the 4-digit code space, not by capacity. |
 | `MAX_USERS_PER_ROOM` | `32` | Connections per room. |
-| `MAX_DOCS_PER_ROOM` | `50` | Documents per room. |
-| `MAX_DOC_BYTES` | `5242880` | Per-document text size. |
-| `MAX_FILES_PER_ROOM` | `500` | Files per room. |
+| `MAX_DOCS_PER_ROOM` | `0` | Documents per room; `0` means unlimited. |
+| `MAX_DOC_BYTES` | `0` | Per-document text size; `0` means unlimited. |
+| `MAX_FILES_PER_ROOM` | `0` | Files per room; `0` means unlimited. |
 | `MAX_FILE_BYTES` | `0` | Per-file cap; `0` means unlimited. |
 | `MAX_ROOM_TOTAL_BYTES` | `0` | Per-room total; `0` means unlimited. |
-| `MAX_WS_MESSAGE_BYTES` | `1048576` | Rejects oversized frames. |
+| `DISK_HEADROOM_BYTES` | `2147483648` | Disk the application will not spend, so cleanup itself always can. |
+| `MEMORY_HEADROOM_BYTES` | `536870912` | The same, for the memory documents live in. |
+| `MEMORY_POLL_INTERVAL_MS` | `2000` | How long a memory reading is reused; it is consulted per applied update. |
+| `MAX_WS_MESSAGE_BYTES` | `1048576` | **Control frames only.** Document text travels as binary CRDT frames and is not bounded by this. |
+| `WS_MAX_FRAME_BYTES` | `268435456` | Transport ceiling, passed to Uvicorn as `--ws-max-size`. One paste is one frame. |
 | `MAX_DISPLAY_NAME_CHARS` | `32` | |
 | `MAX_DOC_NAME_CHARS` | `128` | |
 | `MAX_FILENAME_CHARS` | `255` | |
-| `MAX_UPLOADS_PER_USER` | `5` | Concurrent uploads per connection. |
+| `MAX_UPLOADS_PER_USER` | `5` | Concurrent transfers per connection. Not a limit on how many files may be uploaded: the client queues the rest and every chosen file still arrives. |
+
+Two consequences worth stating outright, because they are easy to get wrong:
+
+* **The memory guard never refuses an edit.** An update that has arrived is always applied. Rejecting it would leave the sending browser holding text the server does not have, and a silently diverged CRDT is a far worse outcome than a room that is merely large. The room is told instead - once, then at most every 30 seconds - so a participant can delete a document or a file. A platform that exposes no memory reading is treated as "not under pressure", never as "full".
+* **`WS_MAX_FRAME_BYTES` is a real ceiling and it is not the application's.** One paste into the editor is one Yjs update is one WebSocket frame, and Uvicorn's 16 MiB default closes the socket with 1009 before the application sees the frame at all. It is raised in `backend/docker-entrypoint.sh`; a deployment that starts Uvicorn some other way must pass `--ws-max-size` itself or it silently caps how much text a person can paste.
 
 Exceeding a limit produces a clear user-facing message, never a stack trace.
 
@@ -810,8 +825,10 @@ User=ephemeral
 WorkingDirectory=/opt/ephemeral-rooms
 EnvironmentFile=/etc/ephemeral-rooms.env
 # Exactly one worker. See spec section 20.1. Do not add --workers.
+# --ws-max-size is load-bearing, not tuning; see §21.3.
 ExecStart=/opt/ephemeral-rooms/.venv/bin/uvicorn app.main:app \
-          --host 127.0.0.1 --port 8000 --workers 1
+          --host 127.0.0.1 --port 8000 --workers 1 \
+          --ws-max-size 268435456
 Restart=always
 RestartSec=2
 ```
@@ -906,7 +923,7 @@ The server is authoritative for: room membership, room existence and lifecycle s
 
 **Amendment.** For document *text*, the server is the custodian of state, not the arbiter of conflicts. It holds the canonical `pycrdt.Doc`, applies every update to it, and serves late joiners and reconnecting clients from it, but it does not transform or reorder operations; convergence comes from the CRDT itself (§7.1). This is the correct reading of "authoritative" for a CRDT architecture, and v1's stronger wording is superseded.
 
-The server holding a real CRDT document, rather than blindly relaying opaque bytes, is what makes the rest of the design work: it can answer a reconnecting client with a state-vector diff instead of replaying every update since the room opened, and it can enforce `MAX_DOC_BYTES` because it can actually read the document length.
+The server holding a real CRDT document, rather than blindly relaying opaque bytes, is what makes the rest of the design work: it can answer a reconnecting client with a state-vector diff instead of replaying every update since the room opened, and it can say how long a document actually is - which is what an operator-set `MAX_DOC_BYTES` needs, and what lets the room be told what it is holding.
 
 Clients cannot assign their own UUID, claim another user's identity without their session token, set their own `clientID`, or alter uploader metadata. Given §21.1, clients *can* freely access any room they know the code for; that is the accepted model, not a bug.
 
@@ -961,7 +978,7 @@ README covering: overview; architecture with diagram; local setup; running front
 1. **How conflict resolution actually works**, with a worked two-user example showing concurrent insertion at the same position, the resulting text, and why. Include the observed tie-break direction and the pinned Yjs version.
 2. **How ephemeral cleanup is guaranteed**, tracing a room from last-user-leaves through `EMPTY_GRACE`, `CLOSING`, directory deletion, and verification, and explaining why the §34 race cannot resurrect data.
 
-**Known limitations to state explicitly:** server restart loses all rooms; **single Uvicorn worker only, so the application cannot be scaled horizontally or even vertically by adding workers** (§20.1); room codes are enumerable and confer full access; CRDT documents accumulate tombstones, so a long-lived heavily-edited room grows in memory (bounded in practice by `MAX_DOC_BYTES` and by rooms being short-lived); uploads require ordered chunks; large uploads consume disk for their full duration; `pycrdt` is a compiled extension, so the deployment target's architecture must have a matching wheel.
+**Known limitations to state explicitly:** server restart loses all rooms; **single Uvicorn worker only, so the application cannot be scaled horizontally or even vertically by adding workers** (§20.1); room codes are enumerable and confer full access; CRDT documents accumulate tombstones, so a long-lived heavily-edited room grows in memory (bounded by `MEMORY_HEADROOM_BYTES` reporting the pressure rather than by any size cap, and in practice by rooms being short-lived); uploads require ordered chunks; large uploads consume disk for their full duration; `pycrdt` is a compiled extension, so the deployment target's architecture must have a matching wheel.
 
 The README must also record the **verified version quintet** from §0.1 and state that upgrading any of the five requires re-running the compatibility test.
 

@@ -35,6 +35,8 @@ export interface RoomStateValue {
   activeDocumentId: string | null;
   collab: CollabDocument | null;
   storageAvailable: number;
+  /** Memory left for document text, headroom already subtracted. -1 = unknown. */
+  memoryAvailable: number;
   limits: Limits | null;
   toasts: Toast[];
   roomWasCreated: boolean;
@@ -79,6 +81,10 @@ export function useRoom(roomCode: string): RoomStateValue {
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
   const [collab, setCollab] = useState<CollabDocument | null>(null);
   const [storageAvailable, setStorageAvailable] = useState(0);
+  // -1 until the first figure arrives, and it stays -1 on a platform that
+  // exposes nothing to measure - which the status bar renders as nothing at
+  // all rather than as "0 B free".
+  const [memoryAvailable, setMemoryAvailable] = useState(-1);
   const [limits, setLimits] = useState<Limits | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [roomWasCreated, setRoomWasCreated] = useState(false);
@@ -141,6 +147,7 @@ export function useRoom(roomCode: string): RoomStateValue {
       setDocuments(event.room.documents);
       setFiles(event.room.files);
       setStorageAvailable(event.storageAvailable);
+      setMemoryAvailable(event.memoryAvailable);
       setLimits(event.limits);
       if (event.roomWasCreated) setRoomWasCreated(true);
 
@@ -239,6 +246,7 @@ export function useRoom(roomCode: string): RoomStateValue {
           break;
         case 'storage':
           setStorageAvailable(event.available);
+          setMemoryAvailable(event.memoryAvailable);
           break;
         case 'room_closing':
           pushToast(event.reason, 'error');
@@ -344,6 +352,7 @@ export function useRoom(roomCode: string): RoomStateValue {
     activeDocumentId,
     collab,
     storageAvailable,
+    memoryAvailable,
     limits,
     toasts,
     roomWasCreated,

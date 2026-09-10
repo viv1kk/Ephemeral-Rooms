@@ -113,7 +113,12 @@ def parse_client_message(raw: str, *, max_bytes: int) -> ClientMessage:
     """Parse one inbound text frame.
 
     Raises ParseError with a user-safe code and message. The caller reports it
-    as a structured error event and keeps the socket open."""
+    as a structured error event and keeps the socket open.
+
+    `max_bytes` bounds CONTROL messages only - a join, a rename, a name change.
+    Document text is not one of these; it travels as binary CRDT frames, which
+    have no application size limit at all (see Session.handle_binary). Do not
+    reuse this cap there on the assumption that it is a general frame limit."""
     if len(raw.encode("utf-8")) > max_bytes:
         raise ParseError("message_too_large", "That message was too large and was ignored.")
     try:

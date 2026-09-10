@@ -18,7 +18,7 @@ from app.config import Settings
 from app.deps import Services, build_services
 from app.storage.fs import LocalFileStore
 from app.ws.connection import Session
-from tests.fakes import FakeClock, FakeDiskSpace, RecordingConnection
+from tests.fakes import FakeClock, FakeDiskSpace, FakeMemory, RecordingConnection
 
 
 def make_test_settings(data_root: Path) -> Settings:
@@ -43,7 +43,12 @@ def make_test_settings(data_root: Path) -> Settings:
         WS_HEARTBEAT_INTERVAL_MS=20_000,
         WS_HEARTBEAT_TIMEOUT_MS=45_000,
         DISK_HEADROOM_BYTES=1024,
+        MEMORY_HEADROOM_BYTES=1024,
         UPLOAD_STALE_MS=600_000,
+        # The guard caches its reading, and tests move a FakeClock rather than
+        # real time, so a non-zero TTL here would make a test that changes
+        # FakeMemory mid-test depend on how fast the runner is.
+        MEMORY_POLL_INTERVAL_MS=1,
     )
 
 
@@ -63,6 +68,11 @@ def disk() -> FakeDiskSpace:
 
 
 @pytest.fixture
+def memory() -> FakeMemory:
+    return FakeMemory()
+
+
+@pytest.fixture
 def file_store(settings: Settings) -> LocalFileStore:
     return LocalFileStore(settings.DATA_ROOT)
 
@@ -72,10 +82,13 @@ async def services(
     settings: Settings,
     clock: FakeClock,
     disk: FakeDiskSpace,
+    memory: FakeMemory,
     file_store: LocalFileStore,
 ) -> AsyncIterator[Services]:
     await file_store.sweep_data_root()
-    svc = build_services(settings, clock=clock, disk=disk, file_store=file_store)
+    svc = build_services(
+        settings, clock=clock, disk=disk, memory=memory, file_store=file_store
+    )
     yield svc
     await svc.manager.shutdown()
 

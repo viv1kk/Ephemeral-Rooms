@@ -82,10 +82,14 @@ def servers(tmp_path_factory) -> Iterator[None]:
         "WS_HEARTBEAT_TIMEOUT_MS": "6000",
         "LOG_LEVEL": "WARNING",
     }
-    # Exactly one worker; see spec section 20.1.
+    # Exactly one worker; see spec section 20.1. --ws-max-size matches what the
+    # container and the systemd unit pass: without it the transport drops a
+    # large paste before the application sees it, so a test of pasting would
+    # fail here for a reason that does not exist in production.
     api = subprocess.Popen(
         [str(python), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1",
-         "--port", str(BACKEND_PORT), "--workers", "1"],
+         "--port", str(BACKEND_PORT), "--workers", "1",
+         "--ws-max-size", "268435456"],
         cwd=BACKEND,
         env=env,
     )

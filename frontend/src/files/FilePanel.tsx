@@ -6,7 +6,7 @@
  * through the server for other participants (spec section 5).
  */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RoomFile } from '../ws/protocol';
 import { abortUpload, formatBytes, runUpload, type UploadTask } from './upload';
 
@@ -23,6 +23,11 @@ interface FilePanelProps {
 
 let localSeq = 0;
 
+function nextLocalId(): string {
+  localSeq += 1;
+  return `local-${localSeq}`;
+}
+
 export function FilePanel({
   roomCode,
   userId,
@@ -36,55 +41,87 @@ export function FilePanel({
   const [tasks, setTasks] = useState<UploadTask[]>([]);
   const controllers = useRef<Map<string, AbortController>>(new Map());
   const input = useRef<HTMLInputElement>(null);
+  // Accepted but not yet begun, because this browser already has
+  // maxUploadsPerUser transfers open. Drained by the pump below.
+  const [queued, setQueued] = useState<UploadTask[]>([]);
+  const started = useRef<Set<string>>(new Set());
 
   const bump = useCallback((task: UploadTask) => {
     setTasks((current) => current.map((t) => (t.localId === task.localId ? { ...task } : t)));
   }, []);
 
-  const start = useCallback(
-    (chosen: FileList | null) => {
-      if (chosen === null) return;
-      const active = tasks.filter((t) => t.state === 'uploading' || t.state === 'starting').length;
-      const room = Math.max(0, maxUploadsPerUser - active);
-      const accepted = Array.from(chosen).slice(0, room);
-
-      for (const file of accepted) {
-        const task: UploadTask = {
-          localId: `local-${(localSeq += 1)}`,
-          uploadId: null,
-          file,
-          sent: 0,
-          total: file.size,
-          state: 'starting',
-        };
-        setTasks((current) => [...current, task]);
-
-        const controller = new AbortController();
-        controllers.current.set(task.localId, controller);
-        void runUpload(
-          roomCode,
-          userId,
-          task,
-          chunkBytes,
-          { onProgress: bump, onBroadcast: onBroadcastProgress },
-          controller.signal,
-        ).finally(() => {
-          controllers.current.delete(task.localId);
-          // A finished upload comes back as a `file_added` event and takes its
-          // place in the list above, so the transient row retires shortly after
-          // showing 100%. A failed one is kept: it carries the only explanation
-          // the user gets, and is dismissed by hand.
-          window.setTimeout(() => {
-            setTasks((c) =>
-              c.filter((t) => t.localId !== task.localId || t.state === 'error'),
-            );
-          }, 1200);
-        });
-      }
-      if (input.current !== null) input.current.value = '';
+  const begin = useCallback(
+    (task: UploadTask) => {
+      const controller = new AbortController();
+      controllers.current.set(task.localId, controller);
+      void runUpload(
+        roomCode,
+        userId,
+        task,
+        chunkBytes,
+        { onProgress: bump, onBroadcast: onBroadcastProgress },
+        controller.signal,
+      ).finally(() => {
+        controllers.current.delete(task.localId);
+        // It has left the queue, so nothing can start it again and the guard
+        // entry is only holding a string. Dropped so a page that uploads all
+        // day does not accumulate one per file.
+        started.current.delete(task.localId);
+        // A finished upload comes back as a `file_added` event and takes its
+        // place in the list above, so the transient row retires shortly after
+        // showing 100%. A failed one is kept: it carries the only explanation
+        // the user gets, and is dismissed by hand.
+        window.setTimeout(() => {
+          setTasks((c) => c.filter((t) => t.localId !== task.localId || t.state === 'error'));
+        }, 1200);
+      });
     },
-    [roomCode, userId, chunkBytes, tasks, maxUploadsPerUser, bump, onBroadcastProgress],
+    [roomCode, userId, chunkBytes, bump, onBroadcastProgress],
   );
+
+  const start = useCallback((chosen: FileList | null) => {
+    if (chosen === null) return;
+    // Every chosen file is accepted, however many there are and however large.
+    // maxUploadsPerUser bounds how many transfers run AT ONCE - the server
+    // refuses a further init past it - so the rest wait their turn here. They
+    // used to be sliced off and silently discarded, with nothing in the UI to
+    // say that half the selection was never going to arrive.
+    const accepted = Array.from(chosen).map<UploadTask>((file) => ({
+      localId: nextLocalId(),
+      uploadId: null,
+      file,
+      sent: 0,
+      total: file.size,
+      state: 'queued',
+    }));
+    setTasks((current) => [...current, ...accepted]);
+    setQueued((current) => [...current, ...accepted]);
+    if (input.current !== null) input.current.value = '';
+  }, []);
+
+  // The pump: fills the concurrency window from the front of the queue, and
+  // re-runs whenever a transfer finishes or more files are chosen. `started`
+  // is what stops a task being launched twice when this re-runs before React
+  // has applied the state change from the previous pass.
+  useEffect(() => {
+    if (queued.length === 0) return;
+    const active = tasks.filter(
+      (t) => t.state === 'starting' || t.state === 'uploading' || t.state === 'completing',
+    ).length;
+    const room = Math.max(0, maxUploadsPerUser - active);
+    if (room === 0) return;
+
+    const launching = queued.filter((t) => !started.current.has(t.localId)).slice(0, room);
+    if (launching.length === 0) return;
+    const ids = new Set(launching.map((t) => t.localId));
+    for (const id of ids) started.current.add(id);
+    setQueued((current) => current.filter((t) => !ids.has(t.localId)));
+    for (const task of launching) {
+      task.state = 'starting';
+      bump(task);
+      begin(task);
+    }
+  }, [queued, tasks, maxUploadsPerUser, begin, bump]);
 
   // Also serves as "dismiss" for a failed upload: aborting is still the right
   // call there, because the server may be holding a part file and a disk
@@ -95,6 +132,10 @@ export function FilePanel({
     // rather than waiting for the reaper.
     if (task.uploadId !== null) void abortUpload(task.uploadId);
     setTasks((current) => current.filter((t) => t.localId !== task.localId));
+    // A task cancelled while still waiting its turn has to leave the queue
+    // too, or the pump would start it a moment later.
+    setQueued((current) => current.filter((t) => t.localId !== task.localId));
+    started.current.delete(task.localId);
   }, []);
 
   const ordered = [...files].sort((a, b) => b.uploadedAt - a.uploadedAt);
@@ -149,6 +190,8 @@ export function FilePanel({
           </div>
           {task.state === 'error' ? (
             <div className="upload-error">{task.error}</div>
+          ) : task.state === 'queued' ? (
+            <span className="upload-percent waiting">Waiting to start</span>
           ) : (
             <>
               <progress max={task.total} value={task.sent} />

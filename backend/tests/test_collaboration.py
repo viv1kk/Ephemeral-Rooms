@@ -246,8 +246,8 @@ async def test_three_clients_converge_from_divergent_states(
 async def test_the_server_holds_a_real_document_not_opaque_bytes(
     services: Services, make_peer
 ) -> None:
-    """The server must be able to read the text, which is what lets it enforce
-    MAX_DOC_BYTES and serve state-vector diffs (spec section 36)."""
+    """The server must be able to read the text, which is what lets it serve
+    state-vector diffs and report a document's real size (spec section 36)."""
     room, peers, clients, document_id = await _room_with(services, make_peer, 1)
     clients[0].insert(0, "measurable")
     await clients[0].flush()
@@ -261,6 +261,9 @@ async def test_the_server_holds_a_real_document_not_opaque_bytes(
 async def test_an_oversized_document_is_reported_to_the_author(
     services: Services, settings, make_peer
 ) -> None:
+    """Only when an operator has set a cap - it is 0, meaning no limit, by
+    default. What bounds a document otherwise is memory headroom; see
+    tests/test_headroom.py."""
     settings.MAX_DOC_BYTES = 32
     room, peers, clients, document_id = await _room_with(services, make_peer, 1)
 

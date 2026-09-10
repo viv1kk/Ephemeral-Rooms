@@ -475,7 +475,7 @@ Uvicorn:
 
 ```bash
 cd frontend && npm run build && cd ../backend
-SERVE_STATIC_DIR=../frontend/dist .venv/bin/uvicorn app.main:app --port 8000 --workers 1
+SERVE_STATIC_DIR=../frontend/dist .venv/bin/uvicorn app.main:app --port 8000 --workers 1 --ws-max-size 268435456
 ```
 
 ### HSTS preloading

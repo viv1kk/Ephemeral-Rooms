@@ -214,7 +214,17 @@ export function Room(): JSX.Element {
         <span>
           {room.users.length} {room.users.length === 1 ? 'person' : 'people'}
         </span>
-        <span>Available storage: {formatBytes(room.storageAvailable)}</span>
+        {/*
+          * What is left, not what is allowed. Nothing caps a document's length
+          * or a file's size any more, so these two figures are the only answer
+          * to "how much more can this room take" - which is why they are in the
+          * status bar and not buried in a help page. Memory is omitted rather
+          * than shown as zero when the server could not measure it.
+          */}
+        <span>Storage left: {formatBytes(room.storageAvailable)}</span>
+        {room.memoryAvailable >= 0 && (
+          <span>Memory left: {formatBytes(room.memoryAvailable)}</span>
+        )}
       </footer>
 
       <Toasts toasts={room.toasts} onDismiss={room.dismissToast} />

@@ -242,6 +242,10 @@ input, select {
 .upload-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .upload progress { width: 100%; height: 6px; margin-top: 6px; }
 .upload-percent { font-size: 12px; color: var(--text-dim); }
+/* A file that has been accepted but is waiting for a transfer slot. No
+   progress bar, because nothing is being sent yet and an empty one reads as
+   a stalled upload rather than a queued one. */
+.upload-percent.waiting { display: inline-block; margin-top: 6px; font-style: italic; }
 .upload-error { color: var(--danger); font-size: 12px; margin-top: 4px; }
 
 /* ---------------- Room info ---------------- */

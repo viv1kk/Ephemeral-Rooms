@@ -2,9 +2,12 @@
 
 The server holds a real `pycrdt.Doc` per document rather than relaying opaque
 bytes. That is what lets it answer a reconnecting client with a state-vector
-diff instead of replaying the room's whole history, and lets it enforce
-MAX_DOC_BYTES because it can actually read the document length
-(spec section 36).
+diff instead of replaying the room's whole history, and what lets it say how
+long a document actually is - which is how an operator-set MAX_DOC_BYTES is
+enforced at all, and how the room can be told what it is holding
+(spec section 36). Nothing here imposes a size of its own: the default is no
+limit, and what bounds a document is the memory headroom in
+app/storage/memory.py.
 
 The server's own doc does not author edits, so its client ID plays no part in
 tie-breaking; that is decided by the browser's clientID (spec section 7.1).

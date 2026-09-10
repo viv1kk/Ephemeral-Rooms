@@ -25,6 +25,11 @@ from app.ws import events, messages
 
 log = logging.getLogger(__name__)
 
+# How often one socket may be told the same thing about capacity. A room that
+# is genuinely out of memory would otherwise produce a toast per keystroke,
+# which buries the message it is trying to deliver.
+CAPACITY_WARNING_INTERVAL_MS = 30_000
+
 
 class Session:
     def __init__(self, *, connection: PeerConnection, services: Services) -> None:
@@ -37,6 +42,8 @@ class Session:
         # sent to a client that has never synced the document.
         self.subscribed: set[str] = set()
         self._left = False
+        # code -> when it was last sent, for CAPACITY_WARNING_INTERVAL_MS.
+        self._warned_at: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Join
@@ -74,6 +81,7 @@ class Session:
             room.documents.create(new_uuid(), "untitled.txt", self.svc.clock.now_ms())
 
         available = await self.svc.ledger.available_for_new_upload()
+        memory_available = await self.svc.memory.available_for_new_text()
 
         # The acknowledgement must land before any sync traffic: the browser
         # needs clientId to construct its Y.Doc (spec section 7.1).
@@ -85,6 +93,7 @@ class Session:
                 resumed=resumed,
                 room_was_created=created and room.created_by_url_visit,
                 storage_available=available,
+                memory_available=memory_available,
                 limits=client_limits(self.settings),
             )
         )
@@ -178,7 +187,10 @@ class Session:
                 await self.conn.send_bytes(frame)
 
     async def _create_document(self, room: RoomInstance, raw_name: str) -> None:
-        if len(room.documents) >= self.settings.MAX_DOCS_PER_ROOM:
+        # Only when an operator has actually asked for a cap; 0 - the default -
+        # means the room may hold as many documents as memory allows.
+        cap = self.settings.MAX_DOCS_PER_ROOM
+        if cap and len(room.documents) >= cap:
             await self.conn.send_json(
                 events.error(
                     "too_many_documents",
@@ -235,14 +247,18 @@ class Session:
         """Relay a Yjs sync or awareness frame.
 
         Dispatched by channel tag before any JSON parsing is attempted, and
-        handed to the CRDT layer as raw bytes (spec section 5)."""
+        handed to the CRDT layer as raw bytes (spec section 5).
+
+        No size check here. A single frame is one Yjs update, and one paste is
+        one update, so a cap on this is a cap on how much text a person may
+        paste - which is exactly what this application is for. The frame is
+        already in memory by the time this runs, so refusing it would not save
+        the byte that was going to hurt; what protects the process is the
+        memory headroom checked below, and the transport ceiling that bounds a
+        single frame before it is ever assembled (WS_MAX_FRAME_BYTES, passed to
+        Uvicorn as --ws-max-size by backend/docker-entrypoint.sh)."""
         room, user = self.room, self.user
         if room is None or user is None:
-            return
-        if len(frame) > self.settings.MAX_WS_MESSAGE_BYTES:
-            await self.conn.send_json(
-                events.error("message_too_large", "That update was too large and was ignored.")
-            )
             return
         try:
             document_id, payload = sync.decode_frame(frame)
@@ -261,13 +277,7 @@ class Session:
             reply = sync.apply_sync(document_id, doc, payload)
             if reply is not None:
                 await self.conn.send_bytes(reply)
-            if room.documents.text_length(document_id) > self.settings.MAX_DOC_BYTES:
-                await self.conn.send_json(
-                    events.error(
-                        "document_too_large",
-                        "This document has reached its maximum size.",
-                    )
-                )
+            await self._report_capacity(room, document_id)
             # Relay only what actually changed the server's replica, so
                 # duplicated and out-of-order frames cost nothing.
             update = doc.get_update(before)
@@ -286,6 +296,47 @@ class Session:
                 log.debug("dropped a malformed awareness frame")
                 return
             await room.broadcast_bytes(frame, exclude=user.user_id)
+
+    # ------------------------------------------------------------------
+    # Capacity
+    # ------------------------------------------------------------------
+
+    async def _report_capacity(self, room: RoomInstance, document_id: str) -> None:
+        """Tell the author when the room has run into something real.
+
+        Deliberately after the fact, and deliberately not a refusal. The update
+        has already been applied to the server's replica, and that is the point:
+        rejecting it would leave the sender holding text the server does not
+        have, and a CRDT that has silently diverged is a far worse outcome than
+        one that is large. So this reports, and the person decides what to
+        delete - which is also why it says what to do, not just that something
+        is wrong.
+
+        There are two things to run into, and they are checked in that order:
+        an explicit MAX_DOC_BYTES if an operator set one, and otherwise the
+        memory headroom, which is what actually bounds a document here."""
+        if self.settings.MAX_DOC_BYTES:
+            if room.documents.text_length(document_id) > self.settings.MAX_DOC_BYTES:
+                await self._warn(
+                    "document_too_large",
+                    "This document has passed the size limit set on this server.",
+                )
+                return
+
+        if await self.svc.memory.under_pressure():
+            await self._warn(
+                "low_memory",
+                "The server is low on memory. Editing still works, but delete a "
+                "document or a file you no longer need, or move to a new room.",
+            )
+
+    async def _warn(self, code: str, message: str) -> None:
+        now = self.svc.clock.now_ms()
+        last = self._warned_at.get(code)
+        if last is not None and now - last < CAPACITY_WARNING_INTERVAL_MS:
+            return
+        self._warned_at[code] = now
+        await self.conn.send_json(events.error(code, message))
 
     # ------------------------------------------------------------------
     # Departure

@@ -8,7 +8,14 @@ process's memory. A second worker gets a second, empty copy of all of them, and
 the failure is silent rather than loud: two users open the same room code, land
 on different workers, and each sees an empty room containing only themselves.
 
-    uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+    uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1         --ws-max-size 268435456
+
+`--ws-max-size` is not optional in spirit. One paste into the editor is one
+Yjs update is one WebSocket frame, and Uvicorn's 16 MiB default closes the
+socket outright (1009) before the application sees the frame - so that default
+is a hard cap on how much text a person may paste, imposed a layer below
+anything `Settings` can express. The container sets it from
+`WS_MAX_FRAME_BYTES` in `docker-entrypoint.sh`.
 
 Do NOT deploy under `gunicorn -k uvicorn.workers.UvicornWorker -w N`. That is
 the most commonly recommended FastAPI production pattern and it is wrong here

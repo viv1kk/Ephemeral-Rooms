@@ -71,6 +71,22 @@ chmod 0700 "$MOUNT"
 
 log "$(df -h "$MOUNT" | tail -1)"
 
+# The WebSocket frame ceiling, applied here because Uvicorn only takes it as a
+# command-line flag and an exec-form CMD cannot interpolate an environment
+# variable. It matters: one paste into the editor is one Yjs update is one
+# frame, so Uvicorn's 16 MiB default is a ceiling on how much text a person can
+# paste at once - the `websockets` layer closes the socket with 1009 before the
+# application sees a byte of it. The application itself imposes no such limit;
+# this is the transport's, and it exists because a frame must be buffered
+# whole before it can be decoded.
+#
+# Appended rather than baked into CMD so it stays configurable, and guarded so
+# overriding the command with anything else (a shell, a one-off script) does
+# not have a stray uvicorn flag stapled to it.
+if [ "${1:-}" = "uvicorn" ]; then
+    set -- "$@" --ws-max-size "${WS_MAX_FRAME_BYTES:-268435456}"
+fi
+
 # setpriv rather than su/gosu: no extra package, no intermediate process left
 # supervising, and --inh-caps -all makes sure nothing that follows can regain
 # the SYS_ADMIN this script needed. Uvicorn ends up as PID 1's direct

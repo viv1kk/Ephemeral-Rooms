@@ -22,6 +22,7 @@ Collaborate. Share files. Nothing is saved.
 - [Architecture](#architecture)
 - [Local setup](#local-setup)
 - [Environment variables](#environment-variables)
+- [**What bounds a room**](#what-bounds-a-room)
 - [**How conflict resolution actually works**](#how-conflict-resolution-actually-works)
 - [**How ephemeral cleanup is guaranteed**](#how-ephemeral-cleanup-is-guaranteed)
 - [The room lifecycle](#the-room-lifecycle)
@@ -119,8 +120,10 @@ frontend/src/
 
 **The server holds real CRDT documents, not opaque bytes.** That is what lets
 it answer a reconnecting client with a state-vector diff instead of replaying
-the room's whole history, and lets it enforce `MAX_DOC_BYTES` because it can
-actually read the document length.
+the room's whole history, and what lets it say how long a document actually is
+— which is how the room gets told what it is holding, and how an operator-set
+`MAX_DOC_BYTES` is enforced at all. There is no such cap by default; see
+[what bounds a room](#what-bounds-a-room).
 
 ---
 
@@ -134,7 +137,10 @@ it is not needed at runtime on the server).
 cd backend
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt -r requirements-dev.txt   # Windows: .venv\Scripts\pip
-.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --ws-max-size 268435456
+
+# --ws-max-size is not optional here: one paste is one WebSocket frame, and
+# Uvicorn's 16 MiB default drops a larger one before the app ever sees it.
 
 # Frontend, in a second terminal
 cd frontend
@@ -165,7 +171,7 @@ SERVE_STATIC_DIR=../frontend/dist
 
 ```bash
 cd backend
-.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --ws-max-size 268435456
 ```
 
 On Windows the launcher is `.venv\Scripts\uvicorn.exe`. Everything is then on
@@ -176,13 +182,13 @@ To set it for a single run instead of editing `.env`:
 
 ```bash
 # bash
-SERVE_STATIC_DIR=../frontend/dist .venv/bin/uvicorn app.main:app --port 8000 --workers 1
+SERVE_STATIC_DIR=../frontend/dist .venv/bin/uvicorn app.main:app --port 8000 --workers 1 --ws-max-size 268435456
 ```
 
 ```powershell
 # PowerShell - an inline VAR=value prefix is a parser error here
 $env:SERVE_STATIC_DIR = "../frontend/dist"
-.venv\Scripts\uvicorn.exe app.main:app --port 8000 --workers 1
+.venv\Scripts\uvicorn.exe app.main:app --port 8000 --workers 1 --ws-max-size 268435456
 ```
 
 This serves the built files, so there is no hot reload: rebuild after any
@@ -208,6 +214,68 @@ The four that most change behaviour:
 | `USER_RECONNECT_GRACE_MS` | `30000` | How long a disconnected user keeps their identity, name, and CRDT clientID. |
 | `WS_HEARTBEAT_INTERVAL_MS` | `20000` | Ping period. **Must stay comfortably below Nginx's `proxy_read_timeout`**; do not raise one without the other. |
 | `DISK_HEADROOM_BYTES` | `2 GiB` | Never filled into, so the OS and logs are unaffected. |
+
+---
+
+## What bounds a room
+
+**Nothing fixed does.** There is no cap on how much you can type into a
+document, no cap on how large a file may be, and no cap on how many of either a
+room may hold. A room fills up when the *server* is full, and not before.
+
+That is a deliberate reversal of the usual arrangement, for a simple reason: a
+number chosen in advance is either smaller than the machine can carry — in which
+case it refuses work there was room for — or larger, in which case it protects
+nothing. So the limit is measured instead, and it is measured against the thing
+each kind of content actually consumes.
+
+| What | Bounded by | Where |
+|---|---|---|
+| Files | free disk − outstanding reservations − `DISK_HEADROOM_BYTES` | [`reservations.py`](backend/app/files/reservations.py) |
+| Document text | free memory − `MEMORY_HEADROOM_BYTES` | [`memory.py`](backend/app/storage/memory.py) |
+
+Both figures are pushed to every room and shown in the status bar as
+**Storage left** and **Memory left**, refreshed on a timer so each one reflects
+what everyone else is doing rather than only what this browser has done.
+
+**Why memory, and not just disk.** Documents are the one thing a room holds
+that never reaches the filesystem: every CRDT document lives in the backend
+process. With no `MAX_DOC_BYTES` there would otherwise be nothing at all
+bounding how much text a room can accumulate, so memory gets exactly the
+treatment the disk already had — a reserved slice the application will not
+spend, and a guard that reports when what is left has fallen into it. The
+reading comes from the container's cgroup limit where there is one, so it
+reflects `--memory` rather than the host's total, and falls back to
+`/proc/meminfo`'s `MemAvailable`.
+
+**The memory guard never refuses an edit.** An update that has arrived is always
+applied. Rejecting it would leave that browser holding text the server does not
+have, and a silently diverged CRDT is a far worse failure than a room that is
+merely large. What happens instead is that the room is told — once, then at most
+every 30 seconds — so someone can delete a document or a file. A platform that
+exposes no memory reading at all is treated as "not under pressure", never as
+"full": refusing to work because a metrics file could not be parsed would be the
+wrong trade by a wide margin.
+
+**Files still get a hard refusal**, because they can: an upload declares its
+size before it starts, so the ledger can reserve atomically and say no before a
+byte is written. That is the whole point of §17, and it is unchanged.
+
+**One ceiling that is not the application's.** One paste into the editor is one
+Yjs update is one WebSocket frame, and Uvicorn closes the socket with 1009 on a
+frame past `--ws-max-size` — 16 MiB by default — before the application sees any
+of it. `WS_MAX_FRAME_BYTES` (256 MiB) is passed through by
+[`docker-entrypoint.sh`](backend/docker-entrypoint.sh); a deployment that starts
+Uvicorn some other way must pass it too, or it silently caps how much text a
+person can paste at once.
+
+**The knobs still exist.** `MAX_DOC_BYTES`, `MAX_DOCS_PER_ROOM`,
+`MAX_FILE_BYTES`, `MAX_FILES_PER_ROOM` and `MAX_ROOM_TOTAL_BYTES` all still
+work; they simply default to `0`, which means "no application limit". Set one
+when the server needs a ceiling smaller than the machine it runs on — a shared
+host, most obviously. `MAX_UPLOADS_PER_USER` is not one of these: it bounds how
+many transfers a browser opens *at once*, and the client queues the rest, so
+every file you choose still arrives.
 
 ---
 
@@ -1119,8 +1187,11 @@ paths would themselves have no room to work. Usable space is the image size
 minus the headroom — 9.8 GB − 512 MiB, which is the ~9.23 GiB `/api/storage`
 reports.
 
-`MAX_ROOM_TOTAL_BYTES=2147483648` (2 GiB) sits underneath, so one room cannot
-take the whole disk and leave every other room refused.
+`MAX_ROOM_TOTAL_BYTES` is `0`, so a room may use whatever the disk has left.
+There is no per-room share and the free-space check is first-come-first-served,
+which does mean one busy room can take most of the volume — the deliberate
+trade, since a room refusing a file the server had space for is the worse
+outcome. Set it to a byte count if you would rather cap each room.
 
 **The application-level alternative.** `MAX_TOTAL_STORAGE_BYTES` still exists
 and is tested — [`BudgetedDiskSpace`](backend/app/storage/fs.py) caps the figure
@@ -1363,8 +1434,9 @@ protocol helpers.
 - **Room codes are enumerable and confer full access.** Four digits is 9000
   codes; anyone can scan them.
 - **CRDT documents accumulate tombstones.** A long-lived, heavily-edited room
-  grows in memory. Bounded in practice by `MAX_DOC_BYTES` and by rooms being
-  short-lived.
+  grows in memory, and no size cap stands in the way by default. What bounds it
+  is `MEMORY_HEADROOM_BYTES`, which reports the pressure rather than refusing
+  the edit — and, in practice, rooms being short-lived.
 - **Uploads require ordered chunks.** Resume works, but out-of-order chunk
   delivery does not; that is the cost of the single-part-file design.
 - **Large uploads consume disk for their full duration**, and their reservation
