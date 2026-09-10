@@ -21,6 +21,13 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# mkfs.ext4, to build the fixed-size room filesystem on first start. mount,
+# losetup, setpriv and truncate are already in the base image, so this is the
+# only package added to it - still no compiler; see the note below.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends e2fsprogs \
+ && rm -rf /var/lib/apt/lists/*
+
 # Runtime only - no build-essential, because nothing in requirements.txt should
 # ever compile. If a `pip install` here starts invoking a compiler, that is the
 # signal that a wheel is missing for this platform; fix the pin rather than
@@ -34,16 +41,22 @@ RUN pip install -r requirements.txt
 # ownership on the host.
 RUN useradd --system --uid 10001 --create-home --shell /usr/sbin/nologin ephemeral
 
-# The data root. Mode 0700, matching what the systemd deployment requires. It
-# is declared as a volume in compose rather than here: an anonymous VOLUME in
-# the image would leave an orphaned volume behind on every `docker run`, and
-# room data is by definition disposable.
+# The mount point, not the storage. The entrypoint mounts a fixed-size ext4
+# image over this on every start, so all that is created here is the directory
+# the mount lands on. Mode 0700 matches what the systemd deployment requires,
+# and the entrypoint reapplies it to the mounted filesystem's own root.
 ENV DATA_ROOT=/var/lib/ephemeral-rooms
 RUN install -d -o ephemeral -g ephemeral -m 0700 "$DATA_ROOT"
 
 COPY --chown=root:root backend/app ./app
+COPY --chown=root:root --chmod=0755 backend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-USER ephemeral
+# Deliberately NOT `USER ephemeral`. The entrypoint needs root to mount the room
+# filesystem, then drops to `ephemeral` with capabilities cleared before it
+# execs the command below - so Uvicorn itself ends up exactly as unprivileged as
+# it was when this image ran as that user throughout. See the script for why the
+# mount cannot be left to Docker.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 EXPOSE 8000
 

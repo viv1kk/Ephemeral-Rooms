@@ -55,24 +55,64 @@ services:
 
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
-      # Free-space accounting runs against whichever filesystem DATA_ROOT
-      # lands on - here the Docker volume, so effectively the host's disk.
-      # The default reserves 2 GiB of headroom; lower it if you are testing on
-      # a small volume, or the UI will report no space available.
-      DISK_HEADROOM_BYTES: ${DISK_HEADROOM_BYTES:-2147483648}
+      # ------------------------------------------------ The 10 GB room storage
+      #
+      # The ceiling is the filesystem itself, not a setting. The entrypoint
+      # mounts a fixed-size ext4 image at DATA_ROOT on every start, so statvfs
+      # reports 10 GB and the kernel returns ENOSPC past it. Size it with
+      # ROOM_DISK_SIZE below, not here.
+      #
+      # The application's own ceiling is therefore off. Its enforcement is
+      # equivalent but redundant now, and two limits that can disagree is one
+      # more thing to reason about; set it if you ever want a budget SMALLER
+      # than the filesystem.
+      MAX_TOTAL_STORAGE_BYTES: ${MAX_TOTAL_STORAGE_BYTES:-0}
+
+      # Still worth keeping with a real filesystem underneath: this is what
+      # stops the volume being filled to the very last byte, where the reaper
+      # and the cleanup paths would themselves have no room to work.
+      DISK_HEADROOM_BYTES: ${DISK_HEADROOM_BYTES:-536870912}
+
+      # Size of the room filesystem, read by the entrypoint. Changing this does
+      # NOT resize an image that already exists - the entrypoint only creates
+      # one when it is missing. To resize: `docker compose down -v`, which
+      # discards the image, then bring the stack back up.
+      ROOM_DISK_SIZE: ${ROOM_DISK_SIZE:-10G}
+
+      # One room cannot swallow the whole budget. Nothing above enforces a
+      # per-room share - the global free-space check is first-come-first-served -
+      # so without this a single room could fill the disk and every other room
+      # would be refused its next upload. 0 restores unlimited.
+      MAX_ROOM_TOTAL_BYTES: ${MAX_ROOM_TOTAL_BYTES:-2147483648}
 
       # Every other knob in backend/.env.example works here too - add it as a
       # line above. Values are validated at startup, so a malformed one fails
       # the container immediately rather than at the first request.
 
+    # Enough privilege to mount a loop-backed filesystem, and no more.
+    # `privileged: true` would also work and is what most examples reach for;
+    # it is not needed, and it would hand the container the whole host device
+    # tree to cap one directory. The entrypoint gives all of this up before
+    # Uvicorn starts.
+    cap_add:
+      - SYS_ADMIN   # mount(2)
+      - MKNOD       # create the /dev/loopN nodes, absent from a container's /dev
+    devices:
+      - /dev/loop-control
+    device_cgroup_rules:
+      - 'b 7:* rmw'  # block major 7 = loop devices
+
     volumes:
-      # Room files. A named volume rather than the container's writable layer
-      # so large uploads do not grow the overlay, and so free-space checks see
-      # a real filesystem. Nothing here is meant to survive: the server deletes
-      # everything under the data root on every startup, which is what makes
-      # the no-persistence guarantee true in practice (spec sections 15, 19).
-      # `docker compose down -v` is always safe.
-      - room-data:/var/lib/ephemeral-rooms
+      # The BACKING STORE, not the room files. It holds one sparse ext4 image,
+      # which the entrypoint mounts at DATA_ROOT - so the room files live inside
+      # a filesystem of fixed size rather than directly on this volume, which is
+      # what gives statvfs a real ceiling to report.
+      #
+      # Sparse, so the host only gives up what is actually written. Nothing here
+      # is meant to survive either: the server deletes everything under the data
+      # root on every startup (spec sections 15, 19), and `docker compose down
+      # -v` discards the image itself, which is also how you resize it.
+      - room-backing:/backing
 
     # The image's HEALTHCHECK gates the web container's startup below.
 
@@ -160,4 +200,4 @@ services:
 
 
 volumes:
-  room-data:
+  room-backing:
