@@ -23,6 +23,16 @@
 
 services:
   backend:
+    # Published by CI to Docker Hub. DOCKERHUB_NAMESPACE lives in .env, so no
+    # account name is hardcoded here; BACKEND_IMAGE overrides the whole
+    # reference when you promote or roll back to a specific :sha- tag.
+    #
+    # Deliberately NOT labelled for Watchtower. Recreating this container
+    # destroys every live room, document, presence entry and uploaded file, so
+    # it is never updated unattended - you promote it, at a moment you choose:
+    #
+    #     docker compose pull backend && docker compose up -d backend
+    image: ${BACKEND_IMAGE:-${DOCKERHUB_NAMESPACE:?set DOCKERHUB_NAMESPACE in .env - see .env.example}/ephemeral-rooms-backend:latest}
     build:
       # Repository root, so both images share one .dockerignore and the web
       # image can reach deploy/security-headers.conf.
@@ -117,10 +127,18 @@ services:
     # The image's HEALTHCHECK gates the web container's startup below.
 
   web:
+    image: ${WEB_IMAGE:-${DOCKERHUB_NAMESPACE:?set DOCKERHUB_NAMESPACE in .env - see .env.example}/ephemeral-rooms-web:latest}
     build:
       context: .
       dockerfile: frontend/Dockerfile
     restart: unless-stopped
+
+    # The one container Watchtower is allowed to update by itself. Recreating
+    # Nginx drops inbound connections and nothing else - no room, document or
+    # upload lives in this container - so a new frontend build can land
+    # unattended. The backend cannot; see the note on that service.
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
 
     ports:
       # Loopback only. Put a TLS terminator in front for anything public;
@@ -197,6 +215,79 @@ services:
       # answer to "is the site actually up?". The image is distroless with no
       # shell, so it carries no HEALTHCHECK of its own; this is the substitute.
       - "127.0.0.1:${TUNNEL_METRICS_PORT:-2000}:2000"
+
+
+  # ---------------------------------------------------------------- watchtower
+  #
+  # The continuous-deployment half. It polls Docker Hub for a new digest behind
+  # the `web` image's tag and, when one appears, pulls it and recreates that one
+  # container. Nothing is pushed to this machine and no port is opened: the poll
+  # is outbound, the same direction as the tunnel, which is what lets the whole
+  # stack keep its "no inbound port" property.
+  #
+  # Behind a profile, so it is opt-in. `docker compose up -d` on a laptop should
+  # not silently start something that replaces containers from a registry:
+  #
+  #     docker compose --profile watchtower up -d      # deployment machine
+  #     docker compose up -d                           # everywhere else
+  #
+  # Once started it stays started - `unless-stopped` outlives reboots without
+  # naming the profile again.
+  #
+  #   !!  MOUNTING THE DOCKER SOCKET IS ROOT-EQUIVALENT on this machine. Anyone
+  #   !!  who can reach this container can control every container on the host.
+  #   !!  That is inherent to how Watchtower works, and the reason it is pinned
+  #   !!  to a digestible version and given a read-only socket is not available.
+  #   !!  Do not publish a port from this service, and do not add others to it.
+  watchtower:
+    # The nicholas-fedor fork, not containrrr/watchtower, and this is not a
+    # preference - the original is broken against the Docker daemon on this
+    # machine. containrrr/watchtower:1.7.1 (its last release) defaults to Docker
+    # API v1.25, Docker Engine 29 refuses anything below v1.40, and the result
+    # is not a clean error but a nil-pointer panic in the metrics package. It
+    # can be forced to work by pinning DOCKER_API_VERSION=1.44, but that is a
+    # workaround on an unmaintained tool that mounts the Docker socket, and
+    # v1.44 will eventually be dropped too. This fork is maintained and
+    # negotiates the API version by itself - verified here answering on v1.55.
+    #
+    # It reads the same com.centurylinklabs.watchtower.enable label, so it is a
+    # drop-in swap if you ever want to move back.
+    image: nickfedor/watchtower:1.22.1
+    restart: unless-stopped
+    profiles: ["watchtower"]
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    environment:
+      # Opt-in, not opt-out. Only containers carrying
+      # com.centurylinklabs.watchtower.enable=true are considered, which today
+      # is `web` alone. `backend` is excluded because recreating it destroys
+      # every live room; `tunnel` because its version is pinned deliberately and
+      # Cloudflare occasionally ships breaking client changes.
+      WATCHTOWER_LABEL_ENABLE: "true"
+
+      # Remove the superseded image after a successful update. Without this the
+      # old layers stay on disk after every deploy.
+      WATCHTOWER_CLEANUP: "true"
+
+      # Seconds between registry checks. Every check is a manifest request that
+      # counts against Docker Hub's pull limit, so this is a rate-limit dial as
+      # much as a latency one - see the CD section of README.md before lowering
+      # it. One image at 15 minutes is ~96 checks a day.
+      WATCHTOWER_POLL_INTERVAL: ${WATCHTOWER_POLL_INTERVAL:-900}
+
+      # Give Nginx time to finish in-flight responses instead of being killed.
+      WATCHTOWER_TIMEOUT: 30s
+
+      # Authenticate the poll. Optional for a public image, but anonymous pulls
+      # are rate-limited far more aggressively than authenticated ones, and a
+      # limit reached here looks exactly like "the deploy silently stopped
+      # working". Use a SEPARATE, READ-ONLY Docker Hub token here - not the
+      # read/write one CI pushes with - so this socket-mounted container cannot
+      # publish images even if it is compromised.
+      REPO_USER: ${DOCKERHUB_USERNAME:-}
+      REPO_PASS: ${DOCKERHUB_READ_TOKEN:-}
 
 
 volumes:

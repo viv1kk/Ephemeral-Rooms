@@ -29,7 +29,7 @@ Collaborate. Share files. Nothing is saved.
 - [Security model](#security-model)
 - [Testing](#testing)
 - [Production build](#production-build)
-- [Docker](#docker) — [the 10 GB room storage](#the-10-gb-room-storage)
+- [Docker](#docker) — [continuous deployment](#continuous-deployment), [the 10 GB room storage](#the-10-gb-room-storage)
 - [EC2 deployment](#ec2-deployment) — full runbook: [docs/aws-setup.md](docs/aws-setup.md)
 - [DNS](#dns)
 - [HTTPS with certbot](#https-with-certbot)
@@ -764,6 +764,226 @@ docker compose down -v            # also deletes rooms.img, so the next start
 
 Always safe: the boot sweep empties the data root on every start anyway, so
 nothing in that volume was going to survive.
+
+### Continuous deployment
+
+Push to `main` → CI proves the source → both images are built, **run**, and only
+then pushed to Docker Hub → Watchtower on the deployment machine notices the new
+digest and recreates `web`.
+
+```
+push to main
+   │
+   ├─ backend · frontend · e2e · pinned-versions     must all pass
+   │
+   └─ images    build ─▶ run it ─▶ push :sha-<commit> + :latest
+                                        │
+                                        │  Docker Hub
+                                        ▼
+                          watchtower ──poll──▶ new digest?
+                                        │
+                                        ▼
+                                  pull + recreate  web
+```
+
+Nothing is pushed *to* the machine and no port is opened — the poll is outbound,
+the same direction as the tunnel, which is what lets the stack keep its "no
+inbound port" property. There is no SSH key anywhere in this pipeline.
+
+**Only `web` updates itself.**
+
+| | Auto-updates | Why |
+| --- | --- | --- |
+| `web` | **yes** | Recreating Nginx drops inbound connections and nothing else |
+| `backend` | no | Recreating it destroys **every live room**, document and upload |
+| `tunnel` | no | Its version is pinned deliberately |
+
+The backend is still built, tested and published on every push — it just waits
+for you to promote it, at a moment you choose:
+
+```bash
+docker compose pull backend && docker compose up -d backend
+```
+
+#### The tagging strategy, and why it is both
+
+Every build pushes `sha-<commit>` **and** `latest`.
+
+| | `latest` | `sha-<commit>` |
+| --- | --- | --- |
+| Rollback | impossible from the tag alone | exact, permanent |
+| "What is running?" | unanswerable | unambiguous |
+| **Watchtower can act on it** | **yes** | **no** |
+
+That last row is the reason you cannot simply pin SHAs everywhere. Watchtower
+detects updates by re-resolving *a fixed tag name* and comparing digests. Pin
+`sha-abc123` in `.env` and the digest behind it never changes, so Watchtower has
+nothing to detect — it will sit there forever, doing nothing, looking healthy.
+
+So the deployed reference is the moving tag, and the `sha-` tags accumulate as a
+rollback ledger. Pinning a `sha-` tag deliberately is also how you *freeze* a
+service — useful while investigating, and how `backend` is promoted.
+
+#### Setting it up, once
+
+**1. Docker Hub — two tokens, not one.** *Account Settings → Personal access
+tokens.*
+
+| Token | Scope | Goes to |
+| --- | --- | --- |
+| CI push token | Read & Write | GitHub Actions secret |
+| Server poll token | **Read-only** | `.env` on the machine |
+
+Separate, because the Watchtower container mounts the Docker socket — which is
+root-equivalent on that machine. A read-only token means compromising it still
+cannot publish a poisoned image to your account. Never a password: a token is
+scoped and revocable on its own.
+
+**2. GitHub — Settings → Secrets and variables → Actions.**
+
+| Kind | Name | Value |
+| --- | --- | --- |
+| Secret | `DOCKERHUB_USERNAME` | Your Docker Hub account name |
+| Secret | `DOCKERHUB_TOKEN` | The read/write token |
+| Variable | `PUBLISH_IMAGES` | `true` — the on-switch |
+
+`PUBLISH_IMAGES` is deliberately last: until it is `true` the `images` job is
+skipped, so all of this can be merged and sit inert.
+
+**3. The machine — `.env`, which deployment never writes.**
+
+```
+DOCKERHUB_NAMESPACE=your-dockerhub-username
+DOCKERHUB_USERNAME=your-dockerhub-username
+DOCKERHUB_READ_TOKEN=<the read-only token>
+WATCHTOWER_POLL_INTERVAL=900
+```
+
+**4. Start Watchtower.** It is behind a profile, so `docker compose up -d` on a
+laptop never silently starts something that replaces containers from a registry.
+
+```bash
+docker compose --profile watchtower up -d
+```
+
+Once started it stays started — `unless-stopped` carries it across reboots
+without naming the profile again.
+
+#### Testing the whole thing, end to end
+
+Do this in order. Each step is checkable on its own, so a failure tells you
+which stage broke rather than "it didn't deploy".
+
+```bash
+# 1. Locally: does compose resolve to the images you expect?
+docker compose config | grep image:
+#    -> your-name/ephemeral-rooms-backend:latest, .../web:latest
+
+# 2. Push a visible frontend change to main, then watch the Actions tab.
+#    The `images` job must go green. It builds, RUNS the image, then pushes.
+
+# 3. Did the tags actually land? (nothing local involved)
+docker buildx imagetools inspect your-name/ephemeral-rooms-web:latest
+
+# 4. On the machine: is Watchtower watching exactly one container?
+docker compose logs -f watchtower
+#    -> "Update session completed ... scanned=1"
+#       scanned=1 is the safety property: backend and tunnel are NOT in scope.
+
+# 5. Wait one poll interval (default 15 min), or force a check now:
+docker compose restart watchtower
+
+# 6. Did the container actually change?
+docker compose ps web
+docker inspect -f '{{.Image}}' $(docker compose ps -q web)
+
+# 7. Is the site still up, with the new bundle?
+curl -I https://<your-domain>/
+```
+
+To force an immediate check without waiting for the interval, restart the
+Watchtower container — it polls once on start.
+
+#### If something breaks, in stage order
+
+| Symptom | Where to look | Usual cause |
+| --- | --- | --- |
+| `images` job skipped entirely | Actions → the run | `PUBLISH_IMAGES` is not `true`, or it was not a push to `main` |
+| Fails at "Work out the image name" | job log | `DOCKERHUB_USERNAME` secret missing |
+| Fails at **Build** | job log | A real build error — the same one you would get locally |
+| Fails at **Smoke-test** | job log; container logs are dumped | The image builds but does not run. This is the check earning its keep — nothing was pushed |
+| Fails at **Push** | job log | Bad or expired `DOCKERHUB_TOKEN`, or it lacks Write scope |
+| Tag exists but the server never updates | `docker compose logs watchtower` | See the four rows below |
+| ↳ `scanned=0` | | The label is missing — the container predates it. Run `docker compose up -d web` once to apply it |
+| ↳ a `401` from the registry | | `DOCKERHUB_READ_TOKEN` wrong or expired |
+| ↳ `toomanyrequests` | | Docker Hub rate limit — authenticate, and raise `WATCHTOWER_POLL_INTERVAL` |
+| ↳ nothing logged at all | | Watchtower is not running: `docker compose --profile watchtower up -d` |
+| Watchtower says `updated=1`, site looks unchanged | browser | Cached bundle. Hard-reload; asset filenames are hashed, so this is nearly always the browser |
+| Container updated, then restarts in a loop | `docker compose logs web` | A bad image was published. Roll back (below) |
+
+Verifying a stage without triggering the one before it: step 3 checks the
+registry with no server involved; step 4 checks the server with no push
+involved. That is deliberate — you can always bisect down to a single stage.
+
+#### Rolling back
+
+Every commit ever published is still in the registry under its own `sha-` tag,
+so rolling back is a re-tag, not a rebuild.
+
+**From GitHub, no SSH:** Actions → **Roll back** → *Run workflow* → pick the
+service, paste the commit SHA. It checks the target exists, re-points `:latest`
+at it inside the registry, and Watchtower recreates `web` on its next poll — the
+same path a deployment takes, which is the path you have actually tested.
+
+**On the machine, immediately:**
+
+```bash
+WEB_IMAGE=your-name/ephemeral-rooms-web:sha-<good-commit> docker compose up -d web
+```
+
+Rolling `backend` back never happens by itself — it is not watched. Move the tag,
+then promote it deliberately, remembering that it drops every live room.
+
+#### Gotchas worth knowing before you rely on this
+
+**A backend deploy destroys every live room.** Not downtime — data loss, by
+design. Rooms, documents, presence and uploads all live in one process's memory
+on a volume wiped at start. This is precisely why `backend` is excluded from
+Watchtower: unattended room destruction at an unpredictable moment is a very
+different thing from a restart you chose.
+
+**Docker Hub rate limits.** Every poll is a manifest request counting against
+your quota, and the limits have been tightened more than once — check the
+current numbers rather than trusting a figure written here. Two mitigations, and
+you want both: authenticate the poll (`DOCKERHUB_READ_TOKEN`), and keep
+`WATCHTOWER_POLL_INTERVAL` conservative. One image at 900s is ~96 checks a day.
+A limit hit here looks exactly like "deployment quietly stopped working".
+
+**`containrrr/watchtower` does not work on modern Docker.** Its last release
+defaults to Docker API v1.25; Engine 29 refuses anything below v1.40, and the
+failure is a nil-pointer panic rather than a clean error. That is why this stack
+pins the maintained `nickfedor` fork, which negotiates the version itself. Both
+read the same label, so swapping back is a one-line change if that ever
+reverses.
+
+**The Docker socket is root-equivalent.** Watchtower can control every container
+on the machine. Do not publish a port from it, and keep its registry token
+read-only.
+
+**Watchtower recreates containers outside Compose.** It copies the running
+container's configuration — labels, ports, capabilities and devices all survive
+(verified). But the container was not created by `docker compose up`, so a later
+`docker compose up -d` may recreate it once more to reconcile. Harmless for
+`web`; it is one more reason `backend` is left alone.
+
+**On Docker Desktop, updates only land while the machine is on** and you are
+logged in — Docker Desktop does not start at boot by default. See
+[Keeping it running](#keeping-it-running). A machine that sleeps overnight
+simply picks the update up when it wakes.
+
+**Old images accumulate.** `WATCHTOWER_CLEANUP=true` removes the superseded
+image after each successful update, and is on by default here. Without it, a
+deployment a day quietly fills the disk.
 
 ### Configuration
 
