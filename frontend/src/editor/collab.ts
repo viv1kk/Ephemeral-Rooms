@@ -74,7 +74,50 @@ export function createCollabDocument(
     send(encodeFrame(documentId, encoding.toUint8Array(enc)));
   };
 
+  /**
+   * Keep `awareness.clientID` equal to `doc.clientID`.
+   *
+   * yjs reassigns `doc.clientID` whenever a REMOTE transaction carries structs
+   * authored under the id this replica is currently using, because it cannot
+   * tell "my own earlier work coming back" from "someone else is squatting on
+   * my id". For this application that is not an edge case, it is every resume:
+   * a resumed session keeps its server-assigned clientID (spec section 4.1),
+   * gets a brand-new Y.Doc, and the first sync hands it its own earlier
+   * writing as a remote update. Reload after typing and it fires every time.
+   *
+   * `Awareness` caches `doc.clientID` in its constructor and never re-reads it,
+   * so after the swap the local cursor stays filed under the OLD id while
+   * `y-codemirror.next` compares against the NEW one. Both of its guards then
+   * invert, and the editor gets much worse than merely wrong:
+   *
+   *   - Its re-entrancy guard is "only dispatch when some client OTHER than us
+   *     changed". Our own cursor now looks like someone else's, so every
+   *     cursor move dispatches a transaction from inside a ViewPlugin's
+   *     update() and CodeMirror throws "Calls to EditorView.update are not
+   *     allowed while an update is in progress". One throw per keystroke.
+   *   - Its skip-self check stops matching, so this user is painted a second,
+   *     "remote" caret widget on top of their own native one. Arrow keys then
+   *     crawl, and worst to the RIGHT, because that is the direction that has
+   *     to step over the widget - the caret is inserted with side: 1.
+   *
+   * Re-filing the state under the new id fixes both. Order matters: the old id
+   * is removed first so peers drop the caret that is about to be orphaned,
+   * rather than holding a ghost until it times out.
+   *
+   * Hooked on `afterTransactionCleanup` because that is emitted immediately
+   * after the reassignment; `afterTransaction` runs before it and would still
+   * see the old value.
+   */
+  const realignAwarenessClientId = () => {
+    if (awareness.clientID === doc.clientID) return;
+    const local = awareness.getLocalState();
+    removeAwarenessStates(awareness, [awareness.clientID], 'clientid-reassigned');
+    awareness.clientID = doc.clientID;
+    if (local !== null) awareness.setLocalState(local);
+  };
+
   doc.on('update', onUpdate);
+  doc.on('afterTransactionCleanup', realignAwarenessClientId);
   awareness.on('update', onAwareness);
 
   return {
@@ -85,6 +128,7 @@ export function createCollabDocument(
     undoManager,
     destroy: () => {
       doc.off('update', onUpdate);
+      doc.off('afterTransactionCleanup', realignAwarenessClientId);
       awareness.off('update', onAwareness);
       removeAwarenessStates(awareness, [doc.clientID], 'unmount');
       undoManager.destroy();
