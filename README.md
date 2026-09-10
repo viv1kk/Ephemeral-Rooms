@@ -869,6 +869,26 @@ docker compose --profile watchtower up -d
 Once started it stays started — `unless-stopped` carries it across reboots
 without naming the profile again.
 
+#### Is the deployment current?
+
+One command, rather than four things to remember:
+
+```bash
+./deploy/docker/status.sh
+```
+
+It reports each link in the chain separately - the image digests running versus
+published, the containers, Watchtower's scope, and the bundle actually being
+served - so a stalled deployment localises to a stage instead of reading as "it
+didn't work". Exit status is 0 when everything watched is current and 1 when it
+is not, so it also works as a check in a script.
+
+The comparison it makes is `:latest` against `:latest`, never against a `:sha-`
+tag. `promote` re-points `:latest` with `imagetools create`, which wraps the
+image in a new manifest **index** - so `:latest` and `:sha-<commit>` report
+different digests for byte-identical content, and comparing across the two
+produces a confident, entirely wrong "STALE".
+
 #### Testing the whole thing, end to end
 
 Do this in order. Each step is checkable on its own, so a failure tells you
