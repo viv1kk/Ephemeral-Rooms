@@ -17,14 +17,13 @@ import {
 } from '@codemirror/view';
 import { defaultKeymap, indentWithTab } from '@codemirror/commands';
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
-import { indentUnit, foldGutter } from '@codemirror/language';
+import { indentUnit, foldGutter, bracketMatching } from '@codemirror/language';
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { yCollab } from 'y-codemirror.next';
 import type { CollabDocument } from './collab';
 import { LANGUAGES, languageById, languageForName, type LanguageOption } from './languages';
 import { localCursor } from './localCursor';
-import { guardedBracketMatching } from './brackets';
 
 interface EditorProps {
   collab: CollabDocument;
@@ -77,9 +76,7 @@ export function Editor({ collab, documentName, userName, userColor }: EditorProp
       drawSelection(),
       highlightActiveLine(),
       highlightSelectionMatches(),
-      // Guarded, because the stock one builds a decoration at an undefined
-      // position and throws once per key press; see editor/brackets.ts.
-      guardedBracketMatching(),
+      bracketMatching(),
       closeBrackets(),
       indentUnit.of('  '),
       EditorView.lineWrapping,

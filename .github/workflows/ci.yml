@@ -96,6 +96,34 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      # CodeMirror requires exactly one copy of @codemirror/state in the tree.
+      # Its classes are compared with `instanceof`, so a second copy makes those
+      # checks fail across the boundary - and they fail QUIETLY, by taking the
+      # other branch rather than throwing.
+      #
+      # This is not hypothetical. @codemirror/state was pinned to 6.5.2 while
+      # @codemirror/commands asked for ^6.7.0, so npm nested a second copy;
+      # `resolveTransactionInner` then stopped recognising the EditorSelection
+      # that @codemirror/commands had just built, treated it as a plain
+      # `{anchor, head}` spec, found neither field, and every arrow key press
+      # dispatched a selection whose head was undefined. What the user saw was
+      # an exception per key press from whichever extension read the selection
+      # first - bracketMatching, then closeBrackets once that was guarded.
+      #
+      # `overrides` in package.json is what keeps them collapsed; this is what
+      # makes a regression loud instead of a mystery months later.
+      - name: Exactly one copy of @codemirror/state
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          copies=$(find node_modules -path '*@codemirror/state/package.json' | sort)
+          count=$(printf '%s\n' "$copies" | grep -c . || true)
+          printf '%s\n' "$copies"
+          if [ "$count" -ne 1 ]; then
+            echo "::error::found $count copies of @codemirror/state; there must be exactly one. Align the version or extend the overrides block in frontend/package.json."
+            exit 1
+          fi
+
       - name: Type check
         working-directory: frontend
         run: npm run typecheck
