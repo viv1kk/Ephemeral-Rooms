@@ -29,6 +29,7 @@ Collaborate. Share files. Nothing is saved.
 - [Security model](#security-model)
 - [Testing](#testing)
 - [Production build](#production-build)
+- [Docker](#docker)
 - [EC2 deployment](#ec2-deployment) — full runbook: [docs/aws-setup.md](docs/aws-setup.md)
 - [DNS](#dns)
 - [HTTPS with certbot](#https-with-certbot)
@@ -588,6 +589,168 @@ npm ci
 npm run build          # -> frontend/dist
 rsync -av dist/ user@host:/opt/ephemeral-rooms/frontend/dist/
 ```
+
+---
+
+## Docker
+
+Two containers, the same shape as the systemd deployment: Uvicorn holding all
+the room state, and Nginx serving the built frontend and reverse-proxying
+`/api` and `/ws` to it. Node lives in a build stage and is not in the shipped
+image, so the runtime has no Node on it — exactly as the EC2 instance does not.
+
+```bash
+docker compose up -d --build   # -> http://127.0.0.1:8080
+```
+
+```
+                    │  http://127.0.0.1:8080
+         +----------v----------+
+         | web     nginx       |  dist/, security headers, SPA fallback
+         +----------+----------+
+                    |  http://backend:8000  (never published to the host)
+         +----------v----------+
+         | backend uvicorn     |  every room, doc, presence entry, reservation
+         +----------+----------+
+                    |
+              room-data volume  (wiped on every start)
+```
+
+| File | What it is |
+| --- | --- |
+| [`backend/Dockerfile`](backend/Dockerfile) | Uvicorn, one worker, non-root, Debian slim |
+| [`frontend/Dockerfile`](frontend/Dockerfile) | Node build stage → Nginx serving `dist/` |
+| [`deploy/docker/nginx.conf`](deploy/docker/nginx.conf) | [`deploy/nginx.conf`](deploy/nginx.conf) adapted to the compose network |
+| [`docker-compose.yml`](docker-compose.yml) | Wiring, volume, health gate, restart policies |
+| [`.dockerignore`](.dockerignore) | Shared by both builds — both use the repo root as context |
+
+The response headers come from [`deploy/security-headers.conf`](deploy/security-headers.conf),
+the same file the systemd deployment installs, copied into the web image at
+build time. One source of truth, so the two deployments cannot drift apart on
+something as easy to get wrong as a CSP.
+
+### Keeping it running
+
+Both services are `restart: unless-stopped`, so they come back after a crash,
+after a Docker restart, and after a reboot.
+
+> **One manual step, and without it none of the above happens.** Restart
+> policies only run when the Docker daemon is running, and Docker Desktop does
+> **not** start itself by default. Turn on **Settings → General → Start Docker
+> Desktop when you log in**. Note it is *login*, not boot: after a reboot the
+> stack comes up once you sign in, not at the login screen.
+
+`unless-stopped` deliberately respects a deliberate stop. If you run
+`docker compose stop`, the containers stay down across reboots until you start
+them again — Docker records that you meant it. `docker kill` counts as a manual
+stop too, which is why a killed container does not bounce back. Swap the policy
+to `always` in [`docker-compose.yml`](docker-compose.yml) if you would rather a
+reboot override even a deliberate stop.
+
+### Controlling the application
+
+Run these from the repository root. Everything is `docker compose`, so it acts
+on the whole stack unless you name a service.
+
+**Everyday**
+
+```bash
+docker compose up -d              # start everything, in the background
+docker compose ps                 # what is running, and whether it is healthy
+docker compose logs -f            # follow both; Ctrl-C detaches, stops nothing
+docker compose logs -f backend    # just one service
+docker compose stop               # stop, and stay stopped across reboots
+docker compose start              # undo that
+docker compose restart backend    # restart one service
+docker compose down               # stop and remove containers, keep the volume
+```
+
+**After changing things**
+
+| You changed | What to run |
+| --- | --- |
+| `deploy/docker/nginx.conf` | `docker compose up -d --build web` |
+| Backend Python under `backend/app/` | `docker compose up -d --build backend` |
+| Frontend under `frontend/src/` | `docker compose up -d --build web` |
+| A Dockerfile or `requirements.txt` | `docker compose up -d --build` |
+
+There is no hot reload — these are production images. Edit on the host, rebuild,
+and the affected container is replaced. Rebuilding `backend` destroys every open
+room; rebuilding `web` does not.
+
+**Looking inside**
+
+```bash
+docker compose exec backend sh              # shell in the backend (as the app user)
+docker compose exec backend env | sort      # what settings it actually resolved
+docker compose exec backend du -sh /var/lib/ephemeral-rooms   # room files on disk
+curl 127.0.0.1:8080/api/storage             # free space the app will admit to
+docker stats --no-stream                    # CPU and memory per container
+```
+
+**Starting clean**
+
+```bash
+docker compose down -v            # also deletes the room-data volume
+```
+
+Always safe: the boot sweep empties the data root on every start anyway, so
+nothing in that volume was going to survive.
+
+### Configuration
+
+Compose reads `PUBLIC_ORIGIN`, `REDIRECT_HTTP_TO_HTTPS`, `LOG_LEVEL`,
+`DISK_HEADROOM_BYTES` and `HTTP_PORT` from your shell, each with a default.
+Anything else in [`backend/.env.example`](backend/.env.example) can be added
+under `environment:` for the `backend` service. Settings are validated at
+startup, so a malformed value stops the container immediately rather than at the
+first request; `docker compose logs backend` will name the offending field.
+
+```bash
+PUBLIC_ORIGIN=https://example.com docker compose up -d
+```
+
+Room files go on a named volume rather than the container's writable layer, so
+large uploads do not grow the overlay and free-space checks see a real
+filesystem.
+
+### Four things worth knowing before you change any of it
+
+**Do not scale the backend.** `--scale backend=2` is not a performance knob
+here; it is two separate, invisible copies of the application. Every room,
+document, presence entry, session token and disk reservation lives in one
+process's memory, so two users typing the same room code would land in
+different rooms and each see an empty one. One replica, one worker — the same
+constraint [`deploy/ephemeral-rooms.service`](deploy/ephemeral-rooms.service)
+carries, for the same reason (spec section 20.1).
+
+**`REDIRECT_HTTP_TO_HTTPS` defaults to `false` here**, where the application's
+own default is `true`. The web container terminates plain HTTP and forwards
+`X-Forwarded-Proto: http`; with the redirect on, the application would send a
+301 to an `https://` URL nothing is listening on, and the stack would appear
+completely broken. Turn it on when — and only when — a TLS terminator sits in
+front and forwards `X-Forwarded-Proto: https`. The Nginx config passes an
+upstream `X-Forwarded-Proto` through unchanged, so that works without further
+configuration.
+
+**The backend port is deliberately not published.** Only the web container can
+reach it, which is what makes `--forwarded-allow-ips '*'` safe: nothing else
+can get close enough to forge a forwarding header. Publishing port 8000 to the
+host would invalidate that, and would also route around every security header
+Nginx adds.
+
+**Debian slim, not Alpine.** `pycrdt` is a compiled Rust extension published
+as manylinux (glibc) wheels only. On musl, pip finds no wheel and falls back to
+a source build needing a full Rust toolchain. If a `pip install` in that image
+ever starts invoking a compiler, a wheel is missing for the platform — fix the
+pin rather than installing gcc and hiding it.
+
+### Behind a TLS terminator
+
+The container is not the edge. Point a host Nginx, Traefik, Caddy, or a cloud
+load balancer at `127.0.0.1:8080`, and have it forward `X-Forwarded-Proto`. The
+published port is bound to loopback for that reason; drop the `127.0.0.1:`
+prefix in `docker-compose.yml` only if you know what is in front of it.
 
 ---
 

@@ -1,0 +1,57 @@
+# Build context filter, shared by both images (each is built from the repo
+# root so the web image can copy deploy/security-headers.conf, which is the
+# single source of truth for the response headers).
+#
+# Keep this tight: everything not excluded here is uploaded to the daemon on
+# every build, and backend/.venv plus frontend/node_modules are together
+# larger than the images themselves.
+
+.git
+.github
+.gitignore
+
+# ------------------------------------------------------------------ Secrets
+#
+# Real configuration is passed as environment variables at run time and must
+# never be baked into a layer. `.env.example` is deliberately still included:
+# it is the tracked template and contains no secrets.
+**/.env
+**/.env.local
+**/.env.*.local
+
+# ------------------------------------------------------------------- Python
+**/.venv
+**/venv
+**/__pycache__
+**/*.py[cod]
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
+**/.coverage
+**/htmlcov
+
+# --------------------------------------------------------------------- Node
+**/node_modules
+**/.vite
+# Stale incremental state from a host `tsc -b` would make the in-image build
+# skip emit and produce nothing.
+**/*.tsbuildinfo
+
+# -------------------------------------------------------------- Build output
+# The image builds its own; a host dist/ would silently win the COPY.
+frontend/dist
+
+# ------------------------------------------------------------- Runtime data
+**/.data
+backend/.data-*
+
+# --------------------------------------------------- Tests, docs, scratch
+backend/tests
+e2e
+docs
+README.md
+test-results
+playwright-report
+blob-report
+.playwright
+**/*.log

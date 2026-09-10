@@ -1,0 +1,92 @@
+# Two containers: Uvicorn holding all the room state, and Nginx serving the
+# built frontend and proxying /api and /ws to it. Same shape as the systemd
+# deployment in deploy/, packaged.
+#
+#     docker compose up -d --build       # then http://127.0.0.1:8080
+#
+# Both restart by themselves: `unless-stopped` brings them back when the machine
+# reboots, when Docker restarts, and when a container crashes. That depends on
+# one setting outside this file - Docker Desktop must be set to start when you
+# log in, or nothing here is running to be restarted. See the "Keeping it
+# running" part of the Docker section in README.md.
+#
+#   !!  DO NOT scale the backend. `docker compose up --scale backend=2` is not
+#   !!  a performance knob here - it is two separate, invisible copies of the
+#   !!  application. Every room, document, presence entry, session token and
+#   !!  disk reservation lives in one process's memory (spec section 20.1).
+#   !!  One replica, one worker. Both files say so in more detail.
+
+services:
+  backend:
+    build:
+      # Repository root, so both images share one .dockerignore and the web
+      # image can reach deploy/security-headers.conf.
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+
+    # Deliberately no `ports:`. The backend is reachable only from the web
+    # container, over the compose network, and that is what makes
+    # `--forwarded-allow-ips '*'` in the Dockerfile safe: nothing else can
+    # reach the port to forge an X-Forwarded-Proto. Publishing it would break
+    # that, and would also bypass every security header Nginx adds.
+    expose:
+      - "8000"
+
+    environment:
+      # The public origin, used in logs and for anything that needs to name
+      # itself. Set this to the real https:// URL when you deploy; no domain is
+      # hardcoded anywhere in the source (spec section 31).
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://127.0.0.1:8080}
+
+      # Off by default, and this matters. The web container terminates plain
+      # HTTP, so it forwards X-Forwarded-Proto: http - which, with this on,
+      # makes the application 301 every request to an https:// URL that
+      # nothing is listening on. Turn it on only once a TLS terminator sits in
+      # front of the web container and forwards X-Forwarded-Proto: https,
+      # where it then protects the plain-HTTP hop that terminator might expose
+      # (see backend/app/security.py).
+      REDIRECT_HTTP_TO_HTTPS: ${REDIRECT_HTTP_TO_HTTPS:-false}
+
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      # Free-space accounting runs against whichever filesystem DATA_ROOT
+      # lands on - here the Docker volume, so effectively the host's disk.
+      # The default reserves 2 GiB of headroom; lower it if you are testing on
+      # a small volume, or the UI will report no space available.
+      DISK_HEADROOM_BYTES: ${DISK_HEADROOM_BYTES:-2147483648}
+
+      # Every other knob in backend/.env.example works here too - add it as a
+      # line above. Values are validated at startup, so a malformed one fails
+      # the container immediately rather than at the first request.
+
+    volumes:
+      # Room files. A named volume rather than the container's writable layer
+      # so large uploads do not grow the overlay, and so free-space checks see
+      # a real filesystem. Nothing here is meant to survive: the server deletes
+      # everything under the data root on every startup, which is what makes
+      # the no-persistence guarantee true in practice (spec sections 15, 19).
+      # `docker compose down -v` is always safe.
+      - room-data:/var/lib/ephemeral-rooms
+
+    # The image's HEALTHCHECK gates the web container's startup below.
+
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+
+    ports:
+      # Loopback only. Put a TLS terminator in front for anything public;
+      # override with HTTP_PORT, or drop the 127.0.0.1 prefix knowingly.
+      - "127.0.0.1:${HTTP_PORT:-8080}:80"
+
+    depends_on:
+      backend:
+        # Wait for /api/storage to answer, not merely for the container to
+        # exist, so the first page load cannot race the backend's boot sweep.
+        condition: service_healthy
+
+volumes:
+  room-data:
