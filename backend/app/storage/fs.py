@@ -18,6 +18,8 @@ from typing import AsyncIterator, Awaitable, Callable
 import aiofiles
 import aiofiles.os
 
+from app.storage.protocols import DiskSpaceProvider
+
 READ_CHUNK_BYTES = 256 * 1024
 
 
@@ -81,6 +83,103 @@ class StatvfsDiskSpace:
             st = os.statvfs(target)
             return int(st.f_bavail * st.f_frsize)
         return int(shutil.disk_usage(target).free)
+
+
+class BudgetedDiskSpace:
+    """A `DiskSpaceProvider` that also caps the application to a fixed total.
+
+    The volume is usually far larger than this application is allowed to use -
+    a 1 TB disk shared with everything else on the machine - and there is no
+    portable way to give a container a smaller filesystem: a quota that
+    enforces at write time (ext4 project quotas, for instance) is invisible to
+    `statvfs`, so the ledger would admit an upload it cannot finish and fail it
+    mid-transfer with EDQUOT, which is the exact failure section 17 exists to
+    prevent. A cap the ledger cannot see is worse than no cap.
+
+    So the cap is applied where the ledger already looks:
+
+        reported = min(real free space, MAX_TOTAL_STORAGE_BYTES - bytes in use)
+
+    Everything downstream then follows for free. `available_for_new_upload`
+    subtracts outstanding reservations and the headroom from this figure, so
+    the number in the UI, the admission decision in `reserve` and the
+    mid-transfer re-check all respect the budget without knowing it exists.
+
+    Usage is measured, not tracked. An incremental counter would have to be
+    updated on append, discard, commit, delete, room teardown, the reaper and
+    the boot sweep, and missing one path leaks budget until the next restart -
+    silently, because the number would still look plausible. Walking the tree
+    cannot drift from what is actually on disk.
+
+    The budget and the reservations stay consistent during a transfer because
+    `ReservationLedger.shrink` reduces a reservation by exactly the bytes that
+    have landed: `used + reserved` is invariant for an upload in flight, so a
+    transfer admitted against the budget cannot later breach it.
+    """
+
+    # Ground truth costs a directory walk, and `headroom_breached` runs every
+    # DISK_RECHECK_INTERVAL_BYTES during a transfer - often enough to matter at
+    # MAX_ROOMS x MAX_FILES_PER_ROOM. One second bounds the walk rate without
+    # meaningfully weakening the cap: a stale reading can only over-admit by
+    # what completes inside the window, which is what the headroom absorbs.
+    CACHE_TTL_SECONDS = 1.0
+
+    def __init__(
+        self,
+        inner: "DiskSpaceProvider",
+        *,
+        data_root: Path,
+        budget_bytes: int,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if budget_bytes <= 0:
+            raise ValueError("budget_bytes must be positive; wrap only when a budget is set")
+        self._inner = inner
+        self._root = data_root
+        self._budget = budget_bytes
+        self._monotonic = monotonic
+        self._cached_bytes = 0
+        self._cached_at: float | None = None
+        # `headroom_breached` reads outside the ledger's lock, so two probes can
+        # overlap. This keeps them from both walking the tree.
+        self._lock = asyncio.Lock()
+
+    async def bytes_available(self) -> int:
+        real_free = await self._inner.bytes_available()
+        used = await self.bytes_used()
+        return max(0, min(real_free, self._budget - used))
+
+    async def bytes_used(self) -> int:
+        """Bytes currently stored under the data root, cached briefly."""
+        async with self._lock:
+            now = self._monotonic()
+            if self._cached_at is not None and now - self._cached_at < self.CACHE_TTL_SECONDS:
+                return self._cached_bytes
+            used = await asyncio.to_thread(self._measure)
+            self._cached_bytes = used
+            self._cached_at = now
+            return used
+
+    def _measure(self) -> int:
+        """Total size of every regular file under the data root.
+
+        Blocking, so it is called through `to_thread` (spec section 28.1).
+        Entries that vanish mid-walk are skipped rather than raising: the
+        reaper and room cleanup delete files while this runs, and a partial
+        reading a moment out of date is fine - an exception is not.
+        """
+        total = 0
+        stack = [self._root]
+        while stack:
+            with contextlib.suppress(OSError):
+                with os.scandir(stack.pop()) as entries:
+                    for entry in entries:
+                        with contextlib.suppress(OSError):
+                            if entry.is_dir(follow_symlinks=False):
+                                stack.append(Path(entry.path))
+                            elif entry.is_file(follow_symlinks=False):
+                                total += entry.stat(follow_symlinks=False).st_size
+        return total
 
 
 class LocalFileStore:

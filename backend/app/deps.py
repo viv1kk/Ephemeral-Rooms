@@ -18,7 +18,12 @@ from app.files.reservations import ReservationLedger
 from app.files.storage_feed import StorageBroadcaster
 from app.files.uploads import UploadService
 from app.rooms.manager import RoomManager
-from app.storage.fs import LocalFileStore, StatvfsDiskSpace, SystemClock
+from app.storage.fs import (
+    BudgetedDiskSpace,
+    LocalFileStore,
+    StatvfsDiskSpace,
+    SystemClock,
+)
 from app.storage.protocols import Clock, DiskSpaceProvider, FileStore
 
 
@@ -44,6 +49,16 @@ def build_services(
 ) -> Services:
     clock = clock or SystemClock()
     disk = disk or StatvfsDiskSpace(settings.DATA_ROOT)
+    # Wrapped, not replaced, so the budget composes with the real volume: an
+    # upload is refused when EITHER the disk or the budget cannot take it.
+    # An injected `disk` is wrapped too, which is what lets the budget be
+    # tested against FakeDiskSpace rather than a real volume.
+    if settings.MAX_TOTAL_STORAGE_BYTES > 0:
+        disk = BudgetedDiskSpace(
+            disk,
+            data_root=settings.DATA_ROOT,
+            budget_bytes=settings.MAX_TOTAL_STORAGE_BYTES,
+        )
     file_store = file_store or LocalFileStore(settings.DATA_ROOT)
 
     ledger = ReservationLedger(disk=disk, headroom_bytes=settings.DISK_HEADROOM_BYTES)
