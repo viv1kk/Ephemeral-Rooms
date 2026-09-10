@@ -84,5 +84,17 @@ export default defineConfig({
       '/ws': { target: BACKEND, ws: true, changeOrigin: true },
     },
   },
+  // The commit this bundle was built from, replaced at build time so nothing
+  // is looked up at runtime. VITE_BUILD_ID is set by frontend/Dockerfile from a
+  // build argument; a plain `npm run build` has none, and 'dev' is the honest
+  // answer for a bundle that did not come from CI.
+  //
+  // Note this makes the image content depend on the commit, so every build
+  // produces a new digest even when nothing under src/ changed. That is the
+  // point - a deployed bundle should be traceable to a commit - but it does
+  // mean any push to main republishes the web image.
+  define: {
+    __BUILD_ID__: JSON.stringify(process.env.VITE_BUILD_ID ?? 'dev'),
+  },
   build: { outDir: 'dist', sourcemap: true },
 });

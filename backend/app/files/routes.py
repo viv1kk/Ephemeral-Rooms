@@ -65,6 +65,19 @@ async def create_room(request: Request) -> Any:
     return {"roomCode": room.room_code}
 
 
+@router.get("/version")
+async def version(request: Request) -> dict[str, str]:
+    """Which build of the backend is answering.
+
+    The frontend shows this beside its own build id, and the two are expected
+    to drift: `web` updates itself when a new image is published, while this
+    service is promoted by hand because restarting it destroys every live room.
+    Showing both makes that drift visible instead of leaving it to be inferred
+    from behaviour.
+    """
+    return {"build": services_of(request).settings.BUILD_ID}
+
+
 @router.get("/storage")
 async def storage(request: Request) -> dict[str, int]:
     services = services_of(request)

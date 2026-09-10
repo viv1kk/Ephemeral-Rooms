@@ -84,6 +84,16 @@ input, select {
 .landing-join input { width: 90px; text-align: center; letter-spacing: 4px; }
 .landing-footer { color: var(--text-dim); font-size: 12px; }
 
+/* Which build is running. Deliberately quiet - it is a diagnostic, not
+   something a visitor needs - but present on the page rather than hidden in a
+   header, so "is the deploy live?" is answered by looking. */
+.landing-build { display: block; margin-top: 6px; font-size: 11px; opacity: 0.65; }
+.landing-build code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+
+/* The frontend updates itself; the backend is promoted by hand. When they are
+   from different builds that is worth seeing, not worth alarming about. */
+.landing-build-drift { color: var(--warn, #b8860b); cursor: help; }
+
 /* ---------------- Room shell ---------------- */
 
 .room {
