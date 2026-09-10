@@ -844,19 +844,35 @@ push to main
    │
    ├─ backend · frontend · e2e · pinned-versions     must all pass
    │
-   └─ images    build ─▶ run it ─▶ push :sha-<commit> + :latest
+   └─ images    build ─▶ run it ─▶ push :sha-<commit>
                                         │
-                                        │  Docker Hub
-                                        ▼
-                          watchtower ──poll──▶ new digest?
+                     promote ─▶ move :latest ─▶ POST /v1/update ─┐
+                                        │                        │
+                                        │  Docker Hub            │ tunnel
+                                        ▼                        ▼
+                          watchtower ──poll──▶ new digest? ◀── triggered
                                         │
                                         ▼
                             pull + recreate  backend + web
 ```
 
-Nothing is pushed *to* the machine and no port is opened — the poll is outbound,
-the same direction as the tunnel, which is what lets the stack keep its "no
-inbound port" property. There is no SSH key anywhere in this pipeline.
+**Two paths to the same check, and that is deliberate.** The webhook is the
+fast one: `promote` POSTs to Watchtower the moment `:latest` moves, so a release
+lands in seconds. The poll is the floor, and it is what makes the fast path
+safe to depend on — a machine that was asleep, offline or mid-reboot when CI
+ran picks the same images up on its own later. Neither is load-bearing alone.
+
+Shortening the poll instead of triggering it is the obvious fix and the wrong
+one: every check is a manifest request against Docker Hub's pull limit, so two
+images at one-minute polls is a few thousand requests a day, and hitting that
+limit presents as "the deploy silently stopped working".
+
+No port is opened and there is no SSH key anywhere in this pipeline. The poll is
+outbound, and the trigger arrives through the tunnel the machine already dials
+out to — so the "no inbound port" property survives even though CI can now reach
+in. What the webhook token permits is narrow by construction: it makes Watchtower
+check the registry and pull `:latest`, the image CI just published. It cannot
+name a different image, run a command, or read anything.
 
 **Both published services update themselves.**
 
@@ -936,7 +952,15 @@ DOCKERHUB_READ_TOKEN=<the read-only token>
 WATCHTOWER_POLL_INTERVAL=900
 ```
 
-**4. Start Watchtower.** It is behind a profile, so `docker compose up -d` on a
+**4. Set `WATCHTOWER_HTTP_TOKEN`** in `.env`, and the same value as a GitHub
+Actions secret of that name, plus `DEPLOY_HOOK_URL` pointing at
+`https://<your-hostname>/v1/update`. Generate one with
+`python -c "import secrets; print(secrets.token_urlsafe(48))"`. Watchtower
+refuses to start without it once the endpoint is enabled, and CI falls back to
+the poll if the secrets are absent — so a fork with neither still works, just
+more slowly.
+
+**5. Start Watchtower.** It is behind a profile, so `docker compose up -d` on a
 laptop never silently starts something that replaces containers from a registry.
 
 ```bash
@@ -982,21 +1006,25 @@ docker compose config | grep image:
 # 3. Did the tags actually land? (nothing local involved)
 docker buildx imagetools inspect your-name/ephemeral-rooms-web:latest
 
-# 4. On the machine: is Watchtower watching exactly one container?
+# 4. On the machine: is Watchtower watching both published containers?
 docker compose logs -f watchtower
-#    -> "Update session completed ... scanned=1"
-#       scanned=1 is the safety property: backend and tunnel are NOT in scope.
+#    -> "Update session completed ... scanned=2"
+#       2 is backend and web. tunnel and watchtower are NOT in scope.
 
-# 5. Wait one poll interval (default 15 min), or force a check now with a
-#    one-off container (restarting the service does NOT force one - see below):
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock   nickfedor/watchtower:1.22.1 --label-enable --run-once
+# 5. Did CI's trigger arrive? Check the `Trigger the deployment` step in the
+#    run - it prints the status and Watchtower's JSON summary. Or call it
+#    yourself, which is the same request CI makes (POST, not GET):
+curl -sS -X POST -H "Authorization: Bearer $WATCHTOWER_HTTP_TOKEN"   https://<your-domain>/v1/update
+#    -> {"summary":{"scanned":2,"updated":1,...}}
+#    401 = token mismatch. 405 = you sent a GET. 404 = the tunnel is not
+#    routing that path.
 
-# 6. Did the container actually change?
-docker compose ps web
-docker inspect -f '{{.Image}}' $(docker compose ps -q web)
+# 6. Did the containers actually change?
+docker compose ps
+docker inspect -f '{{.Image}}' $(docker compose ps -q backend)
 
-# 7. Is the site still up, with the new bundle?
-curl -I https://<your-domain>/
+# 7. Is the site up, on the new build?
+curl -fsS https://<your-domain>/api/version
 ```
 
 **Restarting the Watchtower service does not force a check** — it only resets
@@ -1005,15 +1033,18 @@ nothing until then. That is worth knowing before you use it as a diagnostic:
 restart, see no update, and it is easy to conclude the pipeline is broken when
 it is merely waiting.
 
-To force a check now, run a one-off container against the same socket. It scans
-using the same labels and exits:
+To force a check now, the ordinary way is the webhook CI uses — a POST to
+`/v1/update` with the token, which is one HTTPS request and needs nothing local.
+Failing that (no token to hand, or the tunnel is the thing you are debugging),
+run a one-off container against the same socket. It scans using the same labels
+and exits:
 
 ```bash
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock   nickfedor/watchtower:1.22.1 --label-enable --run-once
 ```
 
 Add `--monitor-only` to see what it *would* update without touching anything —
-the safest way to confirm scope, and it should report `scanned=1`.
+the safest way to confirm scope, and it should report `scanned=2`.
 
 #### If something breaks, in stage order
 
@@ -1029,6 +1060,7 @@ the safest way to confirm scope, and it should report `scanned=1`.
 | ↳ a `401` from the registry | | `DOCKERHUB_READ_TOKEN` wrong or expired |
 | ↳ `toomanyrequests` | | Docker Hub rate limit — authenticate, and raise `WATCHTOWER_POLL_INTERVAL` |
 | ↳ nothing logged at all | | Watchtower is not running: `docker compose --profile watchtower up -d` |
+| Release published, nothing happened for 15 min | the `Trigger the deployment` step in the run | The webhook failed and the poll caught it. `401` = token mismatch between `.env` and the `WATCHTOWER_HTTP_TOKEN` secret; `405` = something is doing a GET, it must be a POST; `404` = the tunnel's path rule is not routing `/v1/update`; `000` = the machine was unreachable, which is what the poll is for |
 | Watchtower says `updated=1`, site looks unchanged | browser | Cached bundle. Hard-reload; asset filenames are hashed, so this is nearly always the browser |
 | Container updated, then restarts in a loop | `docker compose logs web` | A bad image was published. Roll back (below) |
 

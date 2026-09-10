@@ -1,0 +1,39 @@
+# Tunnel ingress.
+#
+# This replaces the `--url http://web:80` flag the tunnel used to run with.
+# That flag is shorthand for "one rule, everything to this service", and it
+# stops being enough the moment a second service needs a route - which is what
+# the deploy webhook below is.
+#
+# NO HOSTNAME APPEARS IN THESE RULES, and that is deliberate rather than an
+# omission. An ingress rule may match on hostname, on path, or on both; with
+# the hostname left out a rule matches any host that reaches this tunnel. The
+# tunnel already serves exactly one hostname - the DNS record for it points at
+# this tunnel's UUID - so matching on path alone is sufficient, and it keeps the
+# domain out of the repository, where nothing else hardcodes one either
+# (spec section 31).
+#
+# Rules are evaluated in order and the last one must be a catch-all with no
+# matcher, or cloudflared refuses to start.
+
+ingress:
+  # The deploy webhook. CI calls this the moment `promote` has moved :latest,
+  # so a release lands in seconds instead of waiting out a poll interval.
+  #
+  # Reaching it proves nothing on its own: Watchtower requires the bearer token
+  # in WATCHTOWER_HTTP_TOKEN and rate-limits authentication attempts per IP, so
+  # a request without the token gets a 401 and nothing else. Worth being clear
+  # about what the token actually buys an attacker, too - the endpoint only
+  # makes Watchtower check the registry and pull :latest, which is the image
+  # CI publishes anyway. It cannot be pointed at a different image.
+  #
+  # Anchored exactly, so this routes one path and not a prefix. The application
+  # serves nothing under /v1 - its own API is all under /api - so there is
+  # nothing here to shadow.
+  - path: ^/v1/update$
+    service: http://watchtower:8080
+
+  # Everything else is the application, through Nginx rather than straight to
+  # the backend, so static assets, the SPA fallback and the security headers
+  # all behave exactly as they do locally.
+  - service: http://web:80
