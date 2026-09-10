@@ -1,0 +1,6 @@
+# The entrypoint is run by /bin/sh inside a Linux container, and the image is
+# built from the working tree. On Windows, where core.autocrlf=true, a CRLF
+# checkout makes the shebang line read `/bin/sh<CR>` - and the container then
+# fails to start with a "no such file or directory" naming a file that plainly
+# exists, which is a genuinely baffling half hour. Pin it.
+*.sh text eol=lf

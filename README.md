@@ -29,7 +29,7 @@ Collaborate. Share files. Nothing is saved.
 - [Security model](#security-model)
 - [Testing](#testing)
 - [Production build](#production-build)
-- [Docker](#docker)
+- [Docker](#docker) — [the 10 GB room storage](#the-10-gb-room-storage)
 - [EC2 deployment](#ec2-deployment) — full runbook: [docs/aws-setup.md](docs/aws-setup.md)
 - [DNS](#dns)
 - [HTTPS with certbot](#https-with-certbot)
@@ -625,12 +625,14 @@ docker compose up -d --build   # local: http://127.0.0.1:8080
          | backend uvicorn     |  every room, doc, presence entry, reservation
          +----------+----------+
                     |
-              room-data volume  (wiped on every start)
+        rooms.img on the room-backing volume
+        (fixed-size ext4, mounted by the entrypoint, wiped on every start)
 ```
 
 | File | What it is |
 | --- | --- |
 | [`backend/Dockerfile`](backend/Dockerfile) | Uvicorn, one worker, non-root, Debian slim |
+| [`backend/docker-entrypoint.sh`](backend/docker-entrypoint.sh) | Mounts the fixed-size room filesystem, then drops privileges |
 | [`frontend/Dockerfile`](frontend/Dockerfile) | Node build stage → Nginx serving `dist/` |
 | [`deploy/docker/nginx.conf`](deploy/docker/nginx.conf) | [`deploy/nginx.conf`](deploy/nginx.conf) adapted to the compose network |
 | [`docker-compose.yml`](docker-compose.yml) | Wiring, volume, health gates, restart policies |
@@ -756,7 +758,8 @@ whole diagnostic surface.
 **Starting clean**
 
 ```bash
-docker compose down -v            # also deletes the room-data volume
+docker compose down -v            # also deletes rooms.img, so the next start
+                                  # makes a fresh one - this is how you resize it
 ```
 
 Always safe: the boot sweep empties the data root on every start anyway, so
@@ -773,7 +776,103 @@ request; `docker compose logs backend` will name the offending field.
 
 Room files go on a named volume rather than the container's writable layer, so
 large uploads do not grow the overlay and free-space checks see a real
-filesystem.
+filesystem. How much that volume may consume is covered in
+[The 10 GB storage budget](#the-10-gb-storage-budget) below.
+
+### The 10 GB room storage
+
+Room files live on a **fixed-size ext4 filesystem**, not on the volume directly.
+[`backend/docker-entrypoint.sh`](backend/docker-entrypoint.sh) creates a sparse
+`rooms.img` of `ROOM_DISK_SIZE` on the `room-backing` volume, mounts it at
+`DATA_ROOT`, and only then hands over to Uvicorn. So the limit is the kernel's:
+`statvfs` reports 10 GB, and a write past it gets `ENOSPC`.
+
+```
+room-backing volume  ──  rooms.img (sparse, 10 GB apparent / 68 MB actual)
+                            │  mount -o loop, by the entrypoint, every start
+                            ▼
+                     /var/lib/ephemeral-rooms   ext4, 9.8 GB, dedicated
+```
+
+Nothing in the application enforces this; `MAX_TOTAL_STORAGE_BYTES` is `0`.
+
+**Why the entrypoint and not Docker.** Docker cannot mount a loop-backed
+filesystem: the `local` volume driver calls `mount(2)`, which has no `loop`
+handling — `-o loop` is a `mount(8)` userspace feature — so
+`--opt o=loop` fails with `data: loop: invalid argument`. Pointing a volume at a
+pre-attached `/dev/loopN` does work, but leaves a Docker object pointing at a
+kernel object that does not survive a restart, and the failure is unrecoverable:
+
+```
+$ docker run -d --restart unless-stopped -v rooms-data:/data alpine sleep 999
+Error: failed to mount local volume: mount /dev/loop7: input/output error
+$ docker ps -a
+looptest: Created          ← not "Restarting". A restart policy never retries
+                             a container that failed to start.
+```
+
+Mounting inside the container removes both problems. There is no ordering to get
+right, because the setup and the application are the same process tree; and the
+whole thing is redone from scratch on every start, which is exactly what makes
+it survive a reboot with nothing typed.
+
+**Privileges.** The container gets `SYS_ADMIN` (for `mount`) and `MKNOD` (a
+container's `/dev` has no `loop*` nodes), plus `/dev/loop-control` and a
+`b 7:* rmw` device-cgroup rule. Not `privileged: true`, which most examples
+reach for and which would hand over the whole host device tree to cap one
+directory. The entrypoint gives all of it up before the server starts:
+
+```
+$ docker compose exec backend cat /proc/1/status
+Name:    uvicorn
+Uid:     10001 10001 10001 10001     ← ephemeral, not root
+CapEff:  0000000000000000            ← no capabilities at all
+```
+
+`setpriv --clear-groups --inh-caps=-all` is what does that, and `exec` means
+Uvicorn replaces the script as PID 1, so it still receives `SIGTERM` normally.
+
+**Verified.** Writing past the limit as the application's own user:
+
+```
+$ dd if=/dev/zero of=fill bs=1M count=12000
+9963+0 records out, 10446962688 bytes (9.7 GiB) copied, 15.5 s, 673 MB/s
+/dev/loop2   9.8G  9.8G  220K  100%  /var/lib/ephemeral-rooms
+```
+
+Asked for 12 GB, got 9.8 GB and `ENOSPC`. And across a full Docker Desktop
+restart, with nothing typed:
+
+```
+entrypoint: creating a 10G image at /backing/rooms.img      ← first boot
+entrypoint: /dev/loop2  9.8G  24K  9.8G  1%  /var/lib/...
+entrypoint: /dev/loop2  9.8G  28K  9.8G  1%  /var/lib/...   ← after restart:
+                                                              mounted, not recreated
+```
+
+**Two things to know.**
+
+The image is sparse, so it claims 10 GB and occupies only what has been written
+— but it never shrinks. Delete a 9 GB room and the filesystem inside has 9 GB
+free again while `rooms.img` stays 9 GB on the host, because that is its
+high-water mark. `docker compose down -v` discards it and the next start makes a
+fresh one; that is also the only way to change `ROOM_DISK_SIZE`, since the
+entrypoint creates an image only when none exists.
+
+`DISK_HEADROOM_BYTES` still matters with a real filesystem underneath: it stops
+the volume being filled to the very last byte, where the reaper and the cleanup
+paths would themselves have no room to work. Usable space is the image size
+minus the headroom — 9.8 GB − 512 MiB, which is the ~9.23 GiB `/api/storage`
+reports.
+
+`MAX_ROOM_TOTAL_BYTES=2147483648` (2 GiB) sits underneath, so one room cannot
+take the whole disk and leave every other room refused.
+
+**The application-level alternative.** `MAX_TOTAL_STORAGE_BYTES` still exists
+and is tested — [`BudgetedDiskSpace`](backend/app/storage/fs.py) caps the figure
+the ledger reads, at `min(real free, budget − in use)`. It is the right tool when
+the data root is a volume you cannot size, and it needs no privileges at all.
+Here the filesystem does the job better, so it is set to `0`.
 
 ### Four more things worth knowing before you change any of it
 
